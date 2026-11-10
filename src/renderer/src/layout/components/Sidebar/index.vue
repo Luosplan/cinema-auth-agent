@@ -87,20 +87,24 @@ function onDocClick(e) {
 <template>
   <aside class="sidebar">
     <div class="brand">
-      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
-        <rect x="0" y="0" width="24" height="24" rx="6.5" fill="#17181a" />
-        <rect x="5.4" y="8.3" width="13.2" height="7.4" rx="1.5" fill="#fff" />
-        <circle cx="5.4" cy="12" r="1.45" fill="#17181a" />
-        <circle cx="18.6" cy="12" r="1.45" fill="#17181a" />
-        <path
-          d="M12 9.2v1.5M12 11.25v1.5M12 13.3v1.5"
-          stroke="#17181a"
-          stroke-width="1"
-          stroke-linecap="round"
-        />
+      <svg class="logo" viewBox="0 0 100 100" aria-hidden="true">
+        <rect width="100" height="100" rx="18" fill="#0f172a" />
+        <text
+          x="50"
+          y="50"
+          text-anchor="middle"
+          dominant-baseline="central"
+          font-family="'Segoe UI', -apple-system, 'Microsoft YaHei', Arial, sans-serif"
+          font-size="46"
+          font-weight="800"
+          letter-spacing="-1.5"
+          fill="#38bdf8"
+        >
+          HK
+        </text>
       </svg>
       <div class="brand-text">
-        <div class="name">影票授权助手</div>
+        <div class="name">HK票务助手</div>
         <div class="sub">凭证采集端</div>
       </div>
     </div>

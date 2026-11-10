@@ -1,13 +1,11 @@
 /**
- * 会员端接口地址（单一来源）。
+ * 出票系统（ticket-server）接口地址（单一来源）。
  *
- * 登录/续期/退出复用会员端（H5、小程序）同一套服务端接口，
- * 所以这个地址不该让用户填 —— 装上就应该能直接登录。
- *
- * 默认指向本地开发服（smart-bid-ticket-server，端口 5000）；
- * 出线上包时改这一行，或用环境变量 CINEMA_API_BASE 覆盖，界面无需改动。
+ * 登录、影城列表都走这套服务端，所以地址不该让用户填 —— 装上就能用。
+ * 默认指向 HK 票务线上服；本地联调时用环境变量 CINEMA_API_BASE 覆盖，界面无需改动。
+ * 接口路径固定为 /api 前缀（与 ticket-server 的挂载方式一致）。
  */
-export const DEFAULT_API_BASE = 'http://localhost:5000/api'
+export const DEFAULT_API_BASE = 'https://203.195.196.67/api'
 
 export function resolveApiBase() {
   const fromEnv = String(process.env.CINEMA_API_BASE || '').trim()

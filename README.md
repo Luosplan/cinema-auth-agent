@@ -1,7 +1,8 @@
-# 影票授权助手（cinema-auth-agent）
+# HK票务助手（cinema-auth-agent）
 
 > **当前分支：`hkticketing` —— HK 票务定制版**
-> 只装载 HK 票务与象塑两套规则，界面不会出现内地票务系统的配置项。
+> 登录与影城列表对接出票系统（ticket-server）。抓包规则已整体移除，
+> 解密域名待后续单独接入，在此之前只记录流量、不提取凭证。
 
 影城票务系统的登录态采集端。装在客户出票电脑上，旁路截获微信小程序登录时产生的
 凭证，加密保存在本地，并可上报到你自己的云端。
@@ -43,17 +44,19 @@
 - 上报默认关闭，未配置地址时软件不向外发送任何数据；
 - 退出/崩溃都会还原系统代理设置（含 lock 文件兜底）。
 
-## 配置一票通 / HK 票务
+## 对接出票系统
 
-编辑 `src/main/collectors/rules/` 下对应的规则文件，或直接在软件「系统配置」里填写域名。
+登录与影城列表走 ticket-server 的接口，地址固定在 `src/main/config/endpoints.js`，
+可用环境变量 `CINEMA_API_BASE` 覆盖，界面上不让用户填：
 
-需要三样东西：
+| 用途 | 接口 |
+| --- | --- |
+| 登录 | `POST /api/login`，body `{ username, password }`，返回扁平 `{ token, id, username, role }` |
+| 探活 | `GET /api/users/me`（JWT 7 天，服务端没有 refresh 接口） |
+| 影城列表 | `GET /api/cinemas`，按 `system` 字段聚合成「出票系统 → 影城」 |
 
-1. **接口域名** — 抓一次包看 Host 头，例如 `app.example.com`；
-2. **登录接口路径与 token 字段** — 规则里的 `tokenPaths` 已预置常见命名，多数情况可直接命中；
-3. **过期特性** — 滑动续期还是绝对过期，决定 `expiry.type`。
-
-象塑光影（`rules/gyyse.js`）是完整可用的参考实现。
+抓包规则（原来的 `src/main/collectors/rules/`）已整体移除，`Extractor` 以空规则集启动。
+解密域名待后续单独接入；在此之前代理只记录流量，不提取凭证，「获取参数」会提示未配置。
 
 ## 开发
 
@@ -71,7 +74,7 @@ npm run build:mac  # 打包 macOS
 ```
 src/main/
   mitm/          代理引擎、证书签发、系统代理接管
-  collectors/    规则引擎与各系统规则
+  collectors/    凭证提取与参数采集（规则目录已移除）
   store/         配置与凭证持久化
   reporter/      云端上报
   router/        IPC 路由

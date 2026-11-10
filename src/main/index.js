@@ -11,13 +11,12 @@ import CertificateAuthority from './mitm/CertificateAuthority'
 import MitmProxy from './mitm/MitmProxy'
 import SystemProxy from './mitm/SystemProxy'
 import Extractor from './collectors/Extractor'
-import { mergeRules } from './collectors/rules'
 import ConfigStore from './store/ConfigStore'
 import CredentialStore from './store/CredentialStore'
 import Reporter from './reporter/Reporter'
 import MemberAuth from './auth/MemberAuth'
 
-const APP_TITLE = '影票授权助手'
+const APP_TITLE = 'HK票务助手'
 const MAX_CAPTURES = 300
 const MAX_LOGS = 500
 
@@ -174,10 +173,11 @@ async function startProxy() {
   if (ctx.proxyRunning) return { running: true, port: ctx.proxy.port }
 
   const port = ctx.config.get('proxy.port') || 9090
-  ctx.extractor.setRules(mergeRules(ctx.config.get('rules')))
+  // 抓包规则已整体移除，解密域名待后续单独接入（设置页会保留入口）。
+  ctx.extractor.setRules([])
 
   if (!ctx.extractor.activeRules.some((r) => (r.hosts || []).length)) {
-    log('warn', '没有任何系统配置了域名，采集不会生效。请先在「系统配置」里填写接口域名')
+    log('warn', '当前没有配置解密域名，抓包只记录不提取凭证')
   }
 
   const actualPort = await ctx.proxy.start(port)
@@ -361,7 +361,8 @@ app.whenReady().then(async () => {
   ctx.ca = new CertificateAuthority(join(ctx.dataDir, 'ca'))
   ctx.ca.init()
 
-  ctx.extractor = new Extractor(mergeRules(ctx.config.get('rules')))
+  // 抓包规则已整体移除，Extractor 先以空规则集启动，等域名配置接入后再填充
+  ctx.extractor = new Extractor([])
 
   ctx.systemProxy = new SystemProxy()
   ctx.reporter = new Reporter({

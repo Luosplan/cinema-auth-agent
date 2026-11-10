@@ -14,8 +14,8 @@ win:
   executableName: CinemaAuthAgent
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
-  shortcutName: 影票授权助手
-  uninstallDisplayName: 影票授权助手
+  shortcutName: HK票务助手
+  uninstallDisplayName: HK票务助手
   createDesktopShortcut: always
   perMachine: false
 mac:

@@ -3,8 +3,8 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
 import fs from 'node:fs'
-import { mergeRules } from '../collectors/rules/index.js'
 import { pickValues } from '../collectors/ParamCollector.js'
+import { buildCinemaTree, accountsOf } from '../api/cinemaMapper.mjs'
 
 const exec = promisify(execFile)
 const PS = ['-NoProfile', '-NonInteractive', '-Command']
@@ -53,15 +53,17 @@ routers.push(
   })
 )
 
-// 影城：会员名下的出票系统 → 影城（出票程序）树；账号数由服务端带回来
-// 路径与 H5 会员端一致：/web/cinema-accounts/group-tree（复数 accounts，按文件名挂载）
+// 影城：出票系统（system）→ 影城，数据来自 ticket-server 的 GET /cinemas
 routers.push(
   new EventRoute('cinemas:tree', 'invoke', async (api) => {
     try {
-      const data = await api.ctx.auth.get('/web/cinema-accounts/group-tree')
+      const rows = await api.ctx.auth.get('/cinemas')
+      const list = Array.isArray(rows) ? rows : []
+      // 缓存原始行，cinemas:accounts 直接按 id 取，不用重复请求
+      api.ctx.serverCinemas = list
       return {
         ok: true,
-        tree: data.tree || [],
+        tree: buildCinemaTree(list),
         autoRenew: api.ctx.config.get('cinemas.autoRenew') || {}
       }
     } catch (e) {
@@ -70,16 +72,21 @@ routers.push(
   })
 )
 
-// 影城下的出票账号（表格里按账号逐行展开，所以选中系统后按影城批量拉）
+// 影城下的出票账号：从缓存的影城行里取，缓存缺失时回源一次
 routers.push(
   new EventRoute('cinemas:accounts', 'invoke', async (api, data) => {
-    const cinemaGroupId = Number((data.params || {}).cinemaGroupId || 0)
-    if (!cinemaGroupId) return { ok: false, message: '缺少影城 ID' }
+    const cinemaId = Number((data.params || {}).cinemaGroupId || 0)
+    if (!cinemaId) return { ok: false, message: '缺少影城 ID' }
     try {
-      const res = await api.ctx.auth.get(
-        `/web/cinema-accounts/list?cinemaGroupId=${cinemaGroupId}`
-      )
-      return { ok: true, lists: res.lists || [] }
+      let list = api.ctx.serverCinemas
+      if (!Array.isArray(list)) {
+        const rows = await api.ctx.auth.get('/cinemas')
+        list = Array.isArray(rows) ? rows : []
+        api.ctx.serverCinemas = list
+      }
+      const row = list.find((item) => Number(item.id) === cinemaId)
+      if (!row) return { ok: false, message: '未找到该影城' }
+      return { ok: true, lists: accountsOf(row) }
     } catch (e) {
       return { ok: false, message: e.message, status: e.status || 0 }
     }
@@ -115,12 +122,8 @@ routers.push(
 
     const rule = ctx.extractor.activeRules.find((r) => r.id === systemCode)
     if (!rule) {
-      return {
-        ok: false,
-        message: systemCode
-          ? `系统「${systemCode}」没有抓包规则，无法自动获取`
-          : '该影城没有关联出票系统，无法确定抓包规则'
-      }
+      // 抓包规则已整体移除，解密域名待后续单独接入 —— 在此之前这个按钮必然拿不到值
+      return { ok: false, message: '抓包域名尚未配置，暂时无法自动获取参数' }
     }
 
     if (!ctx.proxyRunning) {
@@ -237,10 +240,7 @@ routers.push(
   new EventRoute('config:update', 'invoke', async (api, data) => {
     const patch = data.params || {}
     const updated = api.ctx.config.update(patch)
-
-    // 配置变了，规则和白名单要立刻生效，不能等下次启动
-    api.ctx.extractor.setRules(mergeRules(updated.rules))
-
+    // 抓包规则已移除，这里不再需要把配置回灌给 Extractor
     return updated
   })
 )

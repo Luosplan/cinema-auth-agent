@@ -6,18 +6,20 @@ import { resolveApiBase } from '../config/endpoints.js'
 /**
  * 会员账号登录（凭证采集端的「我是谁」）。
  *
- * 复用服务端现成的会员登录接口（`/api/public/login/web/*`），
- * 不做任何自建账号体系：
- *   - 服务端是单设备登录模型 —— 同一账号后登录会踢掉先登录，
- *     同一设备后登录会踢掉先登录的账号，所以 deviceId 必须固化，
- *     这里直接复用 reporter 的 agentId（首次生成后写在 agent.json 里）。
+ * 复用出票系统（ticket-server）现成的账号接口，不自建账号体系：
+ *   - `POST /api/login` 收 `{ username, password }`，回 `{ success, token, id, username, role }`；
+ *     响应是**扁平的**，不像业务接口那样包一层 data。
+ *   - 服务端所有业务接口都认 `Authorization: Bearer <token>`，JWT 有效期 7 天，
+ *     **没有 refresh 接口** —— 所以这里不做静默续期，改成用 `/users/me` 探活。
  *   - token 与采集到的凭证同等敏感，落盘前一律走 safeStorage（DPAPI），
  *     对渲染进程只回脱敏后的资料，明文 token 不出主进程。
  */
 const API = {
-  signIn: '/public/login/web/sign_in',
-  refresh: '/public/login/web/refresh-token',
-  signOut: '/public/login/web/sign_out'
+  // 登录框仍然叫「手机号」，但服务端的 users 表是按 username 查的，
+  // 提交时把手机号当 username 传过去即可。
+  signIn: '/login',
+  // 没有 refresh-token 接口，用「查当前用户」来验证 token 还有没有效
+  me: '/users/me'
 }
 
 /**
@@ -133,8 +135,7 @@ export default class MemberAuth {
             name: member.name || '',
             phone: maskPhone(member.phone),
             phoneMasked: member.phone ? maskPhone(member.phone) : '',
-            systemCount: (member.systemIds || []).length,
-            cinemaGroupCount: (member.cinemaGroupIds || []).length,
+            role: member.role || '',
             loginAt: member.loginAt || null
           }
         : null
@@ -171,12 +172,15 @@ export default class MemberAuth {
     }
 
     if (!res.ok || !json || json.success === false) {
-      const message = json?.message || `HTTP ${res.status}`
+      // ticket-server 的错误字段叫 error，不是 message；两个都认，兜底给 HTTP 状态码
+      const message = json?.error || json?.message || `HTTP ${res.status}`
       const err = new Error(message)
       err.status = res.status
       throw err
     }
-    return json.data || {}
+    // 登录接口的响应是扁平的（token/id/username 直接在顶层），
+    // 业务接口才包 data —— 这里原样返回，由调用方自己取。
+    return json
   }
 
   /**
@@ -212,7 +216,7 @@ export default class MemberAuth {
     }
 
     if (!res.ok || !json || json.success === false) {
-      const err = new Error(json?.message || `HTTP ${res.status}`)
+      const err = new Error(json?.error || json?.message || `HTTP ${res.status}`)
       err.status = res.status
       throw err
     }
@@ -220,52 +224,57 @@ export default class MemberAuth {
   }
 
   /**
-   * 登录。接口地址是编译期固定的会员端地址，登录框只收手机号与密码，密码不落盘。
+   * 登录。接口地址编译期固定，登录框只收手机号与密码：
+   * 出票系统按 username 查用户，这里把手机号当 username 提交，密码不落盘。
    */
   async signIn({ phone, password }) {
-    if (!phone || !password) throw new Error('请填写手机号和密码')
+    const account = String(phone || '').trim()
+    if (!account || !password) throw new Error('请填写手机号和密码')
 
     const data = await this.request(API.signIn, {
-      phone: String(phone).trim(),
-      password: String(password),
-      deviceId: this.deviceId
+      username: account,
+      password: String(password)
     })
 
-    const token = data.accessToken || data.token || ''
+    const token = data.token || data.accessToken || ''
     if (!token) throw new Error('登录响应里没有 token')
 
     this.data.member = {
       id: data.id,
-      name: data.name || '',
-      phone: data.phone || phone,
-      systemIds: data.systemIds || [],
-      cinemaGroupIds: data.cinemaGroupIds || [],
+      name: data.username || account,
+      phone: account,
+      role: data.role || '',
       loginAt: new Date().toISOString()
     }
     this.data.token = this.encrypt(token)
-    // 服务端 sign_in 同时返回 token 与 accessToken，两者相同；
-    // refresh-token 接口也正是用它当 refreshToken 校验 type === 'member'
-    this.data.refreshToken = this.encrypt(data.refreshToken || token)
-    this.data.expiresAt = data.expires || null
+    // 服务端没有 refresh 接口，refreshToken 不再单独保存
+    this.data.refreshToken = null
+    // JWT 固定 7 天，按登录时刻估算一个到期时间给界面展示
+    this.data.expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString()
     this.save()
 
-    this.onLog('info', `会员账号已登录：${this.data.member.name || maskPhone(phone)}`)
+    this.onLog('info', `账号已登录：${this.data.member.name}`)
     return this.status()
   }
 
-  /** token 过期时静默续期；失败即视为掉线 */
+  /**
+   * 没有 refresh-token 接口，所以「续期」退化成探活：
+   * 拿当前 token 请求一次 /users/me，通就刷新本地到期时间，401/403 就当掉线。
+   */
   async refresh() {
-    const refreshToken = this.getRefreshToken()
-    if (!refreshToken) throw new Error('未登录')
+    if (!this.getToken()) throw new Error('未登录')
 
     try {
-      const data = await this.request(API.refresh, { refreshToken })
-      const token = data.accessToken || data.token || ''
-      if (token) {
-        this.data.token = this.encrypt(token)
-        this.data.refreshToken = this.encrypt(token)
+      const me = await this.get(API.me)
+      if (me?.username) {
+        this.data.member = {
+          ...this.data.member,
+          id: me.id ?? this.data.member?.id,
+          name: me.username,
+          role: me.role || this.data.member?.role || ''
+        }
       }
-      if (data.expires) this.data.expiresAt = data.expires
+      this.data.expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString()
       this.save()
       return this.status()
     } catch (e) {
@@ -274,12 +283,11 @@ export default class MemberAuth {
     }
   }
 
+  /**
+   * 服务端没有 sign_out 接口（JWT 无状态，签发即生效到过期），
+   * 退出就是清本地凭证 —— 反正明文 token 只存在本机的 DPAPI 加密文件里。
+   */
   async signOut() {
-    const token = this.getToken()
-    if (token) {
-      // 退出失败（网络不通、token 已过期）不阻塞本地清理
-      await this.request(API.signOut, { token }, token).catch(() => {})
-    }
     this.clear()
     return this.status()
   }
