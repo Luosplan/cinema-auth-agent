@@ -81,6 +81,8 @@ export default class Reporter {
       taskName: payload.taskName,
       account: payload.account,
       token: payload.token,
+      // 附加字段（如鲸鱼系统的 refreshToken）随凭证一起上报，否则云端续不了期
+      extras: payload.extras || null,
       expiresAt: payload.expiresAt,
       updatedAt: payload.updatedAt,
       source: payload.source,

@@ -15,6 +15,43 @@ function ps(script) {
 }
 
 routers.push(
+  new EventRoute('auth:status', 'invoke', async (api) => {
+    return api.ctx.auth.status()
+  })
+)
+
+routers.push(
+  new EventRoute('auth:login', 'invoke', async (api, data) => {
+    const { baseUrl, phone, password } = data.params || {}
+    try {
+      return { ok: true, auth: await api.ctx.auth.signIn({ baseUrl, phone, password }) }
+    } catch (e) {
+      return { ok: false, message: e.message }
+    }
+  })
+)
+
+routers.push(
+  new EventRoute('auth:logout', 'invoke', async (api) => {
+    try {
+      return { ok: true, auth: await api.ctx.auth.signOut() }
+    } catch (e) {
+      return { ok: false, message: e.message }
+    }
+  })
+)
+
+routers.push(
+  new EventRoute('auth:refresh', 'invoke', async (api) => {
+    try {
+      return { ok: true, auth: await api.ctx.auth.refresh() }
+    } catch (e) {
+      return { ok: false, message: e.message }
+    }
+  })
+)
+
+routers.push(
   new EventRoute('proxy:start', 'invoke', async (api) => {
     try {
       return await api.ctx.startProxy()
@@ -65,7 +102,8 @@ routers.push(
     const { ruleId } = data.params || {}
     const entry = api.ctx.credentials.getToken(ruleId)
     if (!entry) return { ok: false, message: '未找到该系统的凭证' }
-    return { ok: true, token: entry.token }
+    // extras 是主凭证之外的附加字段（如鲸鱼系统的 refreshToken），明文只在这里出现一次
+    return { ok: true, token: entry.token, extras: entry.extras || null }
   })
 )
 

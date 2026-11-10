@@ -6,7 +6,9 @@ import { invoke } from '@utils/ipc'
 const rules = ref([])
 const drafts = reactive({})
 const inputs = reactive({})
+const savedHosts = reactive({})
 const saving = ref('')
+const dirty = (id) => !!drafts[id] && drafts[id].hosts.join('|') !== savedHosts[id]
 
 const EXPIRY_TEXT = {
   sliding: '滑动续期（有心跳就不失效）',
@@ -21,6 +23,7 @@ async function load() {
       hosts: [...(rule.hosts || [])],
       enabled: rule.enabled !== false
     }
+    savedHosts[rule.id] = drafts[rule.id].hosts.join('|')
     if (!inputs[rule.id]) inputs[rule.id] = ''
   }
 }
@@ -73,185 +76,213 @@ onMounted(load)
 
 <template>
   <div class="page">
-    <div class="page-head">
-      <h2>系统配置</h2>
-      <p>
-        只有这里列出的域名会被解密，其余流量全部原样直通，不影响客户机上任何其他网站。
-        域名格式支持通配，例如 <code class="mono">*.example.com</code>。
-      </p>
-    </div>
-
-    <div v-for="rule in rules" :key="rule.id" class="rule-card">
-      <div class="rule-head">
-        <div class="rule-title">
-          <span class="rule-name">{{ rule.name }}</span>
-          <el-tag
-            size="small"
-            :type="drafts[rule.id]?.hosts.length ? 'success' : 'info'"
-            effect="light"
-          >
-            {{ drafts[rule.id]?.hosts.length ? '采集中' : '未配置域名' }}
-          </el-tag>
-        </div>
-        <el-switch
-          v-model="drafts[rule.id].enabled"
-          active-text="启用"
-          @change="save(rule.id)"
-        />
-      </div>
-
-      <div class="field">
-        <div class="field-label">接口域名</div>
-        <div class="host-list">
-          <el-tag
-            v-for="host in drafts[rule.id].hosts"
-            :key="host"
-            closable
-            size="small"
-            class="host-tag"
-            @close="removeHost(rule.id, host)"
-          >
-            {{ host }}
-          </el-tag>
-          <span v-if="!drafts[rule.id].hosts.length" class="host-empty">尚未添加</span>
-        </div>
-        <div class="host-add">
-          <el-input
-            v-model="inputs[rule.id]"
-            size="small"
-            placeholder="例如 app.example.com"
-            style="width: 260px"
-            @keyup.enter="addHost(rule.id)"
-          />
-          <el-button size="small" @click="addHost(rule.id)">添加</el-button>
-          <el-button
-            size="small"
-            type="primary"
-            :loading="saving === rule.id"
-            @click="save(rule.id)"
-          >
-            保存
-          </el-button>
+    <div class="page-inner">
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">系统配置</h1>
+          <p class="page-desc">
+            只有这里列出的域名会被解密，其余流量原样直通，不影响客户机上的其他网站。支持
+            <code class="mono">*.example.com</code> 通配。
+          </p>
         </div>
       </div>
 
-      <div class="rule-foot">
-        <span class="foot-key">过期策略</span>
-        <span class="foot-val">{{ EXPIRY_TEXT[rule.expiry?.type] || '未知' }}</span>
+      <div v-if="!rules.length" class="empty-box">规则加载中…</div>
+
+      <div v-else class="rules">
+        <div v-for="rule in rules" :key="rule.id" class="rule">
+          <div class="rule-head">
+            <div class="rule-id">
+              <span class="rule-name">{{ rule.name }}</span>
+              <span class="pill" :class="drafts[rule.id]?.hosts.length ? 'ok' : ''">
+                {{ drafts[rule.id]?.hosts.length ? '采集中' : '未配置' }}
+              </span>
+            </div>
+            <el-switch v-model="drafts[rule.id].enabled" size="small" @change="save(rule.id)" />
+          </div>
+
+          <div class="field">
+            <span class="field-label">域名</span>
+            <div class="field-body">
+              <div class="host-tags">
+                <span v-for="host in drafts[rule.id].hosts" :key="host" class="host">
+                  <span class="mono">{{ host }}</span>
+                  <button class="host-x" title="移除" @click="removeHost(rule.id, host)">×</button>
+                </span>
+                <span v-if="!drafts[rule.id].hosts.length" class="host-empty">尚未添加</span>
+              </div>
+
+              <div class="host-add">
+                <el-input
+                  v-model="inputs[rule.id]"
+                  size="small"
+                  placeholder="app.example.com"
+                  class="host-input"
+                  @keyup.enter="addHost(rule.id)"
+                />
+                <el-button size="small" @click="addHost(rule.id)">添加</el-button>
+                <el-button
+                  size="small"
+                  type="primary"
+                  :loading="saving === rule.id"
+                  :disabled="!dirty(rule.id)"
+                  @click="save(rule.id)"
+                >
+                  保存
+                </el-button>
+              </div>
+            </div>
+          </div>
+
+          <div class="rule-foot">
+            <span class="k">过期策略</span>
+            <span class="v">{{ EXPIRY_TEXT[rule.expiry?.type] || '未知' }}</span>
+          </div>
+        </div>
       </div>
     </div>
-
-    <div v-if="!rules.length" class="empty">规则加载中…</div>
   </div>
 </template>
 
 <style lang="scss" scoped>
-.page {
-  height: 100%;
-  overflow-y: auto;
-  padding: 18px 20px 40px;
+.rules {
+  margin-top: 4px;
+  border-top: 1px solid var(--line-soft);
 }
 
-.page-head h2 {
-  margin: 0 0 6px;
-  font-size: 15px;
-  font-weight: 500;
-  color: #1b2330;
+.rule {
+  padding: 14px 10px 16px;
+  margin: 0 -10px;
+  border-bottom: 1px solid var(--line-soft);
 }
 
-.page-head p {
-  margin: 0 0 18px;
-  font-size: 12px;
-  color: #8b94a4;
-  line-height: 1.8;
-}
-
-.page-head code {
-  background: #f0f3f9;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-size: 11px;
-}
-
-.rule-card {
-  background: #fff;
-  border: 1px solid #e8eaf0;
-  border-radius: 10px;
-  padding: 16px 18px;
-  margin-bottom: 12px;
+.rule:last-child {
+  border-bottom: none;
 }
 
 .rule-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 16px;
 }
 
-.rule-title {
+.rule-id {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .rule-name {
-  font-size: 14px;
-  font-weight: 500;
-  color: #1b2330;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--tx);
 }
 
+/* 标签 - 值 的栅格，比上下堆叠更省纵向空间 */
 .field {
-  margin-top: 16px;
+  display: flex;
+  gap: 14px;
+  margin-top: 12px;
 }
 
 .field-label {
-  font-size: 12px;
-  color: #9aa3b2;
-  margin-bottom: 8px;
+  width: 34px;
+  flex-shrink: 0;
+  padding-top: 4px;
+  font-size: 11.5px;
+  color: var(--tx-4);
 }
 
-.host-list {
+.field-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.host-tags {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  min-height: 24px;
+  min-height: 22px;
   align-items: center;
 }
 
-.host-tag {
-  font-family: ui-monospace, Menlo, Consolas, monospace;
+.host {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 4px 0 7px;
+  font-size: 11.5px;
+  border-radius: 4px;
+  color: var(--tx-2);
+  background: var(--bg-hover);
+}
+
+.host-x {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--tx-4);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.host-x:hover {
+  background: rgba(0, 0, 0, 0.07);
+  color: var(--tx);
 }
 
 .host-empty {
-  font-size: 12px;
-  color: #c0c6d2;
+  font-size: 11.5px;
+  color: var(--tx-4);
 }
 
 .host-add {
   display: flex;
-  gap: 8px;
-  margin-top: 10px;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.host-input {
+  width: 230px;
+}
+
+/* 与 small 输入框（26px）取齐，默认 small 按钮只有 24px */
+.host-add .el-button {
+  height: 26px;
 }
 
 .rule-foot {
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid #f2f4f8;
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding-left: 48px;
+  font-size: 11.5px;
 }
 
-.foot-key {
-  color: #9aa3b2;
-  margin-right: 8px;
+.rule-foot .k {
+  color: var(--tx-4);
 }
 
-.foot-val {
-  color: #4a5568;
+.rule-foot .v {
+  color: var(--tx-3);
 }
 
-.empty {
-  text-align: center;
-  color: #a8b0be;
-  font-size: 12px;
-  padding: 40px;
+code {
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  font-size: 11px;
 }
 </style>
