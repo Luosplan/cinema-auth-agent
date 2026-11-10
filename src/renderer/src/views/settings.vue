@@ -149,8 +149,8 @@ onMounted(() => {
 
           <div class="row">
             <div class="row-main">
-              <div class="row-label">服务地址</div>
-              <div class="row-desc">会员登录与接口调用都走这个地址</div>
+              <div class="row-label">接口地址</div>
+              <div class="row-desc">内置地址，与会员端同一套服务，无需配置</div>
             </div>
             <span class="val mono ellipsis" :title="auth.baseUrl">{{ auth.baseUrl }}</span>
           </div>

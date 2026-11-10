@@ -15,14 +15,16 @@ const route = useRoute()
 const menus = [
   { path: '/dashboard', label: '概览', icon: 'M3 12h3.2l2.4-7 3.6 14 2.6-7H21' },
   {
+    path: '/cinemas',
+    label: '影城账号',
+    icon: 'M3 9.5 12 4l9 5.5M5 11v8.5h14V11M9.5 19.5v-5h5v5'
+  },
+  {
     path: '/systems',
     label: '系统配置',
     icon: 'M12 3 3 7.6l9 4.6 9-4.6L12 3M3 12.4l9 4.6 9-4.6M3 16.9l9 4.6 9-4.6'
   },
-  { path: '/logs', label: '抓包日志', icon: 'M4 6h6M4 12h10M4 18h7M16 15l3 3-3 3' }
-]
-
-const bottomMenus = [
+  { path: '/logs', label: '抓包日志', icon: 'M4 6h6M4 12h10M4 18h7M16 15l3 3-3 3' },
   {
     path: '/settings',
     label: '设置',
@@ -104,21 +106,6 @@ function onDocClick(e) {
     <nav class="nav">
       <router-link
         v-for="item in menus"
-        :key="item.path"
-        :to="item.path"
-        class="nav-item"
-        :class="{ active: route.path === item.path }"
-      >
-        <svg class="ico" viewBox="0 0 24 24" aria-hidden="true">
-          <path :d="item.icon" />
-        </svg>
-        <span class="label">{{ item.label }}</span>
-      </router-link>
-    </nav>
-
-    <nav class="nav nav-bottom">
-      <router-link
-        v-for="item in bottomMenus"
         :key="item.path"
         :to="item.path"
         class="nav-item"
@@ -232,10 +219,7 @@ function onDocClick(e) {
   gap: 1px;
 }
 
-.nav-bottom {
-  margin-top: auto;
-}
-
+/* 菜单全部归在上方一组，剩余空间交给 .footer 兜住状态与账号 */
 .nav-item {
   display: flex;
   align-items: center;

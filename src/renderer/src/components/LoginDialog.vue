@@ -1,14 +1,14 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { auth, login } from '../stores/auth'
+import { login } from '../stores/auth'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false }
 })
 const emit = defineEmits(['update:modelValue', 'success'])
 
-const form = ref({ baseUrl: '', phone: '', password: '' })
+const form = ref({ phone: '', password: '' })
 const loading = ref(false)
 const error = ref('')
 
@@ -17,9 +17,7 @@ const visible = computed({
   set: (v) => emit('update:modelValue', v)
 })
 
-const canSubmit = computed(
-  () => Boolean(form.value.baseUrl.trim() && form.value.phone.trim() && form.value.password)
-)
+const canSubmit = computed(() => Boolean(form.value.phone.trim() && form.value.password))
 
 watch(
   () => props.modelValue,
@@ -27,7 +25,6 @@ watch(
     if (!open) return
     error.value = ''
     loading.value = false
-    form.value.baseUrl = auth.baseUrl || ''
     form.value.phone = ''
     form.value.password = ''
   }
@@ -38,8 +35,8 @@ async function submit() {
   loading.value = true
   error.value = ''
   try {
+    // 服务地址由主进程按「设置 → 上报地址」的 origin 解析，登录框不再收集
     await login({
-      baseUrl: form.value.baseUrl.trim(),
       phone: form.value.phone.trim(),
       password: form.value.password
     })
@@ -58,27 +55,16 @@ async function submit() {
   <el-dialog
     v-model="visible"
     class="login-dialog"
-    width="372px"
+    width="340px"
     align-center
     :show-close="false"
     :close-on-click-modal="!loading"
   >
     <div class="head">
       <div class="title">登录会员账号</div>
-      <p class="desc">采集到的凭证归属该会员账号，一台设备同一时间只登录一个账号。</p>
     </div>
 
     <div class="fields">
-      <label class="field">
-        <span class="k">服务地址</span>
-        <el-input
-          v-model="form.baseUrl"
-          size="small"
-          placeholder="https://your-server.com/api"
-          spellcheck="false"
-        />
-      </label>
-
       <label class="field">
         <span class="k">手机号</span>
         <el-input
@@ -103,7 +89,6 @@ async function submit() {
     </div>
 
     <p v-if="error" class="error">{{ error }}</p>
-    <p v-else class="hint mono">设备标识 {{ auth.deviceId ? auth.deviceId.slice(0, 8) : '—' }}</p>
 
     <div class="actions">
       <el-button size="small" :disabled="loading" @click="visible = false">取消</el-button>
@@ -122,7 +107,7 @@ async function submit() {
 
 <style lang="scss" scoped>
 .head {
-  padding: 2px 2px 16px;
+  padding: 2px 2px 14px;
 }
 
 .title {
@@ -130,13 +115,6 @@ async function submit() {
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--tx);
-}
-
-.desc {
-  margin: 6px 0 0;
-  font-size: 11.5px;
-  line-height: 1.6;
-  color: var(--tx-3);
 }
 
 .fields {
@@ -152,7 +130,7 @@ async function submit() {
 }
 
 .k {
-  width: 56px;
+  width: 46px;
   flex-shrink: 0;
   font-size: 12px;
   color: var(--tx-2);
@@ -170,12 +148,6 @@ async function submit() {
   color: var(--err);
   background: var(--err-bg);
   border-radius: var(--radius);
-}
-
-.hint {
-  margin: 10px 0 0;
-  font-size: 10.5px;
-  color: var(--tx-4);
 }
 
 .actions {

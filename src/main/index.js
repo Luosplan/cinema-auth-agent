@@ -62,7 +62,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1080,
     height: 720,
-    minWidth: 860,
+    minWidth: 900,
     minHeight: 600,
     show: false,
     autoHideMenuBar: true,
@@ -373,22 +373,14 @@ app.whenReady().then(async () => {
   })
 
   // 会员登录复用 reporter 的 agentId 当 deviceId：
-  // 服务端是单设备登录模型，这个值必须一次生成、永不变化
+  // 服务端是单设备登录模型，这个值必须一次生成、永不变化。
+  // 接口地址固定取 config/endpoints.js（会员端同一套服务端），不做用户配置项。
   ctx.auth = new MemberAuth({
     dir: ctx.dataDir,
     deviceId: ctx.reporter.agentId,
     onLog: log
   })
   ctx.auth.load()
-
-  // 上报地址里已经含了服务端 origin，没单独配过登录地址就直接沿用
-  if (!ctx.auth.baseUrl && ctx.config.get('reporter.url')) {
-    try {
-      ctx.auth.setBaseUrl(new URL(ctx.config.get('reporter.url')).origin)
-    } catch {
-      /* 地址不合法就先留空，等用户在登录框里填 */
-    }
-  }
 
   ctx.proxy = new MitmProxy({
     ca: ctx.ca,

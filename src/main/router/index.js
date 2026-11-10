@@ -4,6 +4,7 @@ import { promisify } from 'node:util'
 import { join } from 'node:path'
 import fs from 'node:fs'
 import { mergeRules } from '../collectors/rules/index.js'
+import { pickValues } from '../collectors/ParamCollector.js'
 
 const exec = promisify(execFile)
 const PS = ['-NoProfile', '-NonInteractive', '-Command']
@@ -20,11 +21,12 @@ routers.push(
   })
 )
 
+// 登录：接口地址固定取 config/endpoints.js，与会员端同一套服务端，用户无需配置
 routers.push(
   new EventRoute('auth:login', 'invoke', async (api, data) => {
-    const { baseUrl, phone, password } = data.params || {}
+    const { phone, password } = data.params || {}
     try {
-      return { ok: true, auth: await api.ctx.auth.signIn({ baseUrl, phone, password }) }
+      return { ok: true, auth: await api.ctx.auth.signIn({ phone, password }) }
     } catch (e) {
       return { ok: false, message: e.message }
     }
@@ -47,6 +49,116 @@ routers.push(
       return { ok: true, auth: await api.ctx.auth.refresh() }
     } catch (e) {
       return { ok: false, message: e.message }
+    }
+  })
+)
+
+// 影城：会员名下的出票系统 → 影城（出票程序）树；账号数由服务端带回来
+// 路径与 H5 会员端一致：/web/cinema-accounts/group-tree（复数 accounts，按文件名挂载）
+routers.push(
+  new EventRoute('cinemas:tree', 'invoke', async (api) => {
+    try {
+      const data = await api.ctx.auth.get('/web/cinema-accounts/group-tree')
+      return {
+        ok: true,
+        tree: data.tree || [],
+        autoRenew: api.ctx.config.get('cinemas.autoRenew') || {}
+      }
+    } catch (e) {
+      return { ok: false, message: e.message, status: e.status || 0 }
+    }
+  })
+)
+
+// 影城下的出票账号（表格里按账号逐行展开，所以选中系统后按影城批量拉）
+routers.push(
+  new EventRoute('cinemas:accounts', 'invoke', async (api, data) => {
+    const cinemaGroupId = Number((data.params || {}).cinemaGroupId || 0)
+    if (!cinemaGroupId) return { ok: false, message: '缺少影城 ID' }
+    try {
+      const res = await api.ctx.auth.get(
+        `/web/cinema-accounts/list?cinemaGroupId=${cinemaGroupId}`
+      )
+      return { ok: true, lists: res.lists || [] }
+    } catch (e) {
+      return { ok: false, message: e.message, status: e.status || 0 }
+    }
+  })
+)
+
+// 「自动续期」开关：目前只做本地持久化，续期执行逻辑待接
+routers.push(
+  new EventRoute('cinemas:auto-renew', 'invoke', async (api, data) => {
+    const { cinemaGroupId, enabled } = data.params || {}
+    if (!cinemaGroupId) return { ok: false, message: '缺少影城 ID' }
+    const map = { ...(api.ctx.config.get('cinemas.autoRenew') || {}) }
+    map[cinemaGroupId] = Boolean(enabled)
+    api.ctx.config.set('cinemas.autoRenew', map)
+    return { ok: true, autoRenew: map }
+  })
+)
+
+/**
+ * 参数弹窗的「获取参数」：按该影城的抓包字段清单去抓包记录里捞值。
+ * 先把已有记录扫一遍（用户可能刚登录过），没凑齐就等新流量进来，直到超时。
+ * 需要该系统有抓包规则 —— 没有规则意味着代理连流量都不解密，抓不到东西。
+ */
+routers.push(
+  new EventRoute('cinemas:capture-params', 'invoke', async (api, data) => {
+    const { ctx } = api
+    const params = data.params || {}
+    const keys = Array.isArray(params.keys)
+      ? [...new Set(params.keys.filter(Boolean).map(String))]
+      : []
+    const systemCode = String(params.systemCode || '')
+    if (!keys.length) return { ok: false, message: '该影城没有配置抓包参数' }
+
+    const rule = ctx.extractor.activeRules.find((r) => r.id === systemCode)
+    if (!rule) {
+      return {
+        ok: false,
+        message: systemCode
+          ? `系统「${systemCode}」没有抓包规则，无法自动获取`
+          : '该影城没有关联出票系统，无法确定抓包规则'
+      }
+    }
+
+    if (!ctx.proxyRunning) {
+      try {
+        await ctx.startProxy()
+      } catch (e) {
+        return { ok: false, message: `抓包代理启动失败：${e.message}` }
+      }
+    }
+
+    const values = {}
+    // 只回扫最近 200 条：更早的基本是别的系统，翻全量没意义还慢
+    let scanned = Math.max(0, ctx.captures.length - 200)
+    const scanNew = () => {
+      const list = ctx.captures
+      if (list.length < scanned) scanned = 0 // 缓冲被截断过，从头再扫
+      for (let i = scanned; i < list.length; i += 1) {
+        const record = list[i]
+        if (ctx.extractor.hostMatches(rule, record.host)) {
+          Object.assign(values, pickValues(record, keys))
+        }
+      }
+      scanned = list.length
+    }
+
+    scanNew()
+    const waitMs = Math.min(Math.max(Number(params.waitMs) || 20000, 3000), 60000)
+    const deadline = Date.now() + waitMs
+    while (keys.some((key) => !values[key]) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 700))
+      scanNew()
+    }
+
+    return {
+      ok: true,
+      values,
+      missing: keys.filter((key) => !values[key]),
+      proxyRunning: ctx.proxyRunning
     }
   })
 )

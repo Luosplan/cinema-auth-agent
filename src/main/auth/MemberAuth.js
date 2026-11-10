@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { safeStorage } from 'electron'
+import { resolveApiBase } from '../config/endpoints.js'
 
 /**
  * 会员账号登录（凭证采集端的「我是谁」）。
@@ -46,13 +47,14 @@ export function maskPhone(phone) {
 }
 
 export default class MemberAuth {
-  constructor({ dir, deviceId, onLog }) {
+  constructor({ dir, deviceId, apiBase, onLog }) {
     this.dir = dir
     this.file = path.join(dir, 'auth.json')
     this.deviceId = deviceId || ''
+    this.apiBase = normalizeBaseUrl(apiBase || resolveApiBase())
     this.onLog = onLog || (() => {})
     this.encryptionAvailable = false
-    this.data = { baseUrl: '', member: null, token: null, refreshToken: null, expiresAt: null }
+    this.data = { member: null, token: null, refreshToken: null, expiresAt: null }
   }
 
   load() {
@@ -67,7 +69,7 @@ export default class MemberAuth {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'))
       this.data = { ...this.data, ...raw }
     } catch {
-      this.data = { baseUrl: '', member: null, token: null, refreshToken: null, expiresAt: null }
+      this.data = { member: null, token: null, refreshToken: null, expiresAt: null }
     }
     return this.data
   }
@@ -98,14 +100,9 @@ export default class MemberAuth {
     }
   }
 
+  /** 固定接口地址，来自 config/endpoints.js，用户不可改 */
   get baseUrl() {
-    return this.data.baseUrl || ''
-  }
-
-  setBaseUrl(url) {
-    this.data.baseUrl = normalizeBaseUrl(url)
-    this.save()
-    return this.data.baseUrl
+    return this.apiBase
   }
 
   isLoggedIn() {
@@ -144,15 +141,12 @@ export default class MemberAuth {
     }
   }
 
-  async request(pathname, body, token, baseOverride) {
-    const base = baseOverride || this.baseUrl
-    if (!base) throw new Error('未配置服务地址')
-
+  async request(pathname, body, token) {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 15000)
     let res
     try {
-      res = await fetch(base + pathname, {
+      res = await fetch(this.apiBase + pathname, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
@@ -163,7 +157,9 @@ export default class MemberAuth {
       })
     } catch (e) {
       clearTimeout(timer)
-      throw new Error(e.name === 'AbortError' ? '连接超时，请检查服务地址' : `无法连接服务器：${e.message}`)
+      throw new Error(
+        e.name === 'AbortError' ? '连接超时，请检查网络或服务端是否已启动' : `无法连接服务器：${e.message}`
+      )
     }
     clearTimeout(timer)
 
@@ -184,29 +180,59 @@ export default class MemberAuth {
   }
 
   /**
-   * 登录。baseUrl 允许在登录框里当场改，密码不落盘。
+   * 只读 GET 接口（影城、账号这类查询），自动带会员 token。
+   * 与 request 的差别只是方法和 body —— 服务端同一套响应包。
    */
-  async signIn({ baseUrl, phone, password }) {
-    const base = normalizeBaseUrl(baseUrl || this.baseUrl)
-    if (!base) throw new Error('未配置服务地址')
+  async get(pathname) {
+    const token = this.getToken()
+    if (!token) throw new Error('未登录')
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 15000)
+    let res
+    try {
+      res = await fetch(this.apiBase + pathname, {
+        method: 'GET',
+        headers: { authorization: `Bearer ${token}` },
+        signal: controller.signal
+      })
+    } catch (e) {
+      clearTimeout(timer)
+      throw new Error(
+        e.name === 'AbortError' ? '连接超时，请检查网络或服务端是否已启动' : `无法连接服务器：${e.message}`
+      )
+    }
+    clearTimeout(timer)
+
+    let json = null
+    try {
+      json = await res.json()
+    } catch {
+      /* 非 JSON 响应，交给下面的兜底报错 */
+    }
+
+    if (!res.ok || !json || json.success === false) {
+      const err = new Error(json?.message || `HTTP ${res.status}`)
+      err.status = res.status
+      throw err
+    }
+    return json.data || {}
+  }
+
+  /**
+   * 登录。接口地址是编译期固定的会员端地址，登录框只收手机号与密码，密码不落盘。
+   */
+  async signIn({ phone, password }) {
     if (!phone || !password) throw new Error('请填写手机号和密码')
 
-    const data = await this.request(
-      API.signIn,
-      {
-        phone: String(phone).trim(),
-        password: String(password),
-        deviceId: this.deviceId
-      },
-      '',
-      base
-    )
+    const data = await this.request(API.signIn, {
+      phone: String(phone).trim(),
+      password: String(password),
+      deviceId: this.deviceId
+    })
 
     const token = data.accessToken || data.token || ''
     if (!token) throw new Error('登录响应里没有 token')
-
-    // 只有登录成功才把服务地址记住
-    this.data.baseUrl = base
 
     this.data.member = {
       id: data.id,
