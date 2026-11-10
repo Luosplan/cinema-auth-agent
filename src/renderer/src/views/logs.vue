@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { invoke, on } from '@utils/ipc'
 import { formatDateTime } from '@utils/common'
@@ -7,7 +7,6 @@ import { formatDateTime } from '@utils/common'
 const activeTab = ref('captures')
 const captures = ref([])
 const logs = ref([])
-const autoScroll = ref(true)
 
 let offCapture = null
 let offLog = null
@@ -17,28 +16,31 @@ async function load() {
   logs.value = (await invoke('logs:list')) || []
 }
 
-async function clearCaptures() {
-  await invoke('captures:clear')
-  captures.value = []
-  ElMessage.success('已清空抓包记录')
-}
-
-async function clearLogs() {
+async function clearActive() {
+  if (activeTab.value === 'captures') {
+    await invoke('captures:clear')
+    captures.value = []
+    ElMessage.success('已清空抓包记录')
+    return
+  }
   await invoke('logs:clear')
   logs.value = []
   ElMessage.success('已清空运行日志')
 }
 
 function statusClass(code) {
-  if (!code) return 'st-fail'
-  if (code >= 500) return 'st-fail'
-  if (code >= 400) return 'st-warn'
-  return 'st-ok'
+  if (!code || code >= 500) return 'fail'
+  if (code >= 400) return 'warn'
+  return 'ok'
 }
 
 function levelClass(level) {
   return `lv-${level || 'info'}`
 }
+
+const activeCount = computed(() =>
+  activeTab.value === 'captures' ? captures.value.length : logs.value.length
+)
 
 onMounted(async () => {
   await load()
@@ -63,134 +65,158 @@ onUnmounted(() => {
 <template>
   <div class="page">
     <div class="page-head">
-      <h2>抓包日志</h2>
-      <p>这里只显示命中白名单域名的请求。直通的流量不会出现在这里，也不会被记录。</p>
+      <div>
+        <h1 class="page-title">抓包日志</h1>
+        <p class="page-desc">
+          只显示命中白名单域名的请求。直通流量不会被记录，也不在这里出现。
+        </p>
+      </div>
     </div>
 
-    <el-tabs v-model="activeTab">
-      <el-tab-pane :label="`请求记录 ${captures.length}`" name="captures">
-        <div class="toolbar">
-          <el-button size="small" @click="clearCaptures">清空</el-button>
-        </div>
-        <div v-if="!captures.length" class="empty">暂无请求。启动采集并打开小程序后会出现。</div>
-        <div v-else class="table">
-          <div class="tr th">
-            <span class="c-time">时间</span>
-            <span class="c-method">方法</span>
-            <span class="c-host">域名</span>
-            <span class="c-path">路径</span>
-            <span class="c-status">状态</span>
-            <span class="c-dur">耗时</span>
-          </div>
-          <div v-for="row in captures.slice().reverse()" :key="row.id" class="tr">
-            <span class="c-time mono">{{ (row.at || '').slice(11, 19) }}</span>
-            <span class="c-method mono">{{ row.method }}</span>
-            <span class="c-host mono" :title="row.host">{{ row.host }}</span>
-            <span class="c-path mono" :title="row.path">{{ row.path }}</span>
-            <span class="c-status mono" :class="statusClass(row.statusCode)">
-              {{ row.statusCode }}
-            </span>
-            <span class="c-dur mono">{{ row.duration }}ms</span>
-          </div>
-        </div>
-      </el-tab-pane>
+    <div class="tabs">
+      <button class="tab" :class="{ active: activeTab === 'captures' }" @click="activeTab = 'captures'">
+        请求记录
+        <span class="count">{{ captures.length }}</span>
+      </button>
+      <button class="tab" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">
+        运行日志
+        <span class="count">{{ logs.length }}</span>
+      </button>
+      <span class="spacer"></span>
+      <el-button v-if="activeCount" size="small" text @click="clearActive">清空</el-button>
+    </div>
 
-      <el-tab-pane :label="`运行日志 ${logs.length}`" name="logs">
-        <div class="toolbar">
-          <el-button size="small" @click="clearLogs">清空</el-button>
+    <template v-if="activeTab === 'captures'">
+      <div v-if="!captures.length" class="empty-box">
+        暂无请求。启动采集并在微信里打开小程序后，这里会出现被解密的请求。
+      </div>
+      <div v-else class="table">
+        <div class="tr th">
+          <span class="c-time">时间</span>
+          <span class="c-method">方法</span>
+          <span class="c-host">域名</span>
+          <span class="c-path">路径</span>
+          <span class="c-status">状态</span>
+          <span class="c-dur">耗时</span>
         </div>
-        <div v-if="!logs.length" class="empty">暂无日志</div>
-        <div v-else class="log-list">
-          <div v-for="(item, idx) in logs.slice().reverse()" :key="idx" class="log-row">
-            <span class="log-time mono">{{ formatDateTime(item.at) }}</span>
-            <span class="log-level" :class="levelClass(item.level)">{{ item.level }}</span>
-            <span class="log-msg">{{ item.message }}</span>
-          </div>
+        <div v-for="row in captures.slice().reverse()" :key="row.id" class="tr">
+          <span class="c-time mono">{{ (row.at || '').slice(11, 19) }}</span>
+          <span class="c-method mono">{{ row.method }}</span>
+          <span class="c-host mono" :title="row.host">{{ row.host }}</span>
+          <span class="c-path mono" :title="row.path">{{ row.path }}</span>
+          <span class="c-status mono" :class="statusClass(row.statusCode)">{{ row.statusCode }}</span>
+          <span class="c-dur mono">{{ row.duration }}ms</span>
         </div>
-      </el-tab-pane>
-    </el-tabs>
+      </div>
+    </template>
+
+    <template v-else>
+      <div v-if="!logs.length" class="empty-box">暂无日志。</div>
+      <div v-else class="log-list">
+        <div v-for="(item, idx) in logs.slice().reverse()" :key="idx" class="log-row">
+          <span class="log-time mono">{{ formatDateTime(item.at) }}</span>
+          <span class="log-level mono" :class="levelClass(item.level)">{{ item.level }}</span>
+          <span class="log-msg">{{ item.message }}</span>
+        </div>
+      </div>
+    </template>
   </div>
 </template>
 
 <style lang="scss" scoped>
-.page {
-  height: 100%;
-  overflow-y: auto;
-  padding: 18px 20px 40px;
-}
-
-.page-head h2 {
-  margin: 0 0 6px;
-  font-size: 15px;
-  font-weight: 500;
-  color: #1b2330;
-}
-
-.page-head p {
-  margin: 0 0 8px;
-  font-size: 12px;
-  color: #8b94a4;
-  line-height: 1.8;
-}
-
-.toolbar {
+.tabs {
   display: flex;
-  justify-content: flex-end;
-  margin-bottom: 8px;
+  align-items: center;
+  gap: 2px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line-soft);
 }
 
-.empty {
-  text-align: center;
-  color: #a8b0be;
-  font-size: 12px;
-  padding: 40px;
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--tx-3);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
 }
 
+.tab:hover {
+  background: var(--bg-hover);
+  color: var(--tx);
+}
+
+.tab.active {
+  background: var(--bg-active);
+  color: var(--tx);
+  font-weight: 500;
+}
+
+.count {
+  font-size: 10.5px;
+  color: var(--tx-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.tab.active .count {
+  color: var(--tx-3);
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* ---- 请求表 ---- */
 .table {
-  background: #fff;
-  border: 1px solid #e8eaf0;
-  border-radius: 10px;
-  overflow: hidden;
+  margin-top: 2px;
 }
 
 .tr {
   display: flex;
   align-items: center;
-  padding: 8px 14px;
-  font-size: 12px;
-  border-bottom: 1px solid #f4f6fa;
-}
-
-.tr:last-child {
-  border-bottom: none;
+  gap: 14px;
+  height: 30px;
+  padding: 0 10px;
+  margin: 0 -10px;
+  font-size: 11.5px;
+  border-radius: 4px;
 }
 
 .tr.th {
-  background: #fafbfd;
-  color: #8b94a4;
+  height: 26px;
+  color: var(--tx-4);
   font-size: 11px;
 }
 
-.tr:hover:not(.th) {
-  background: #fafcff;
+.tr:not(.th):hover {
+  background: var(--bg-hover);
 }
 
 .c-time {
-  width: 74px;
-  color: #9aa3b2;
+  width: 62px;
   flex-shrink: 0;
+  color: var(--tx-4);
 }
 
 .c-method {
-  width: 56px;
-  color: #5a6474;
+  width: 44px;
   flex-shrink: 0;
+  color: var(--tx-3);
 }
 
 .c-host {
-  width: 190px;
-  color: #3d4657;
+  width: 180px;
   flex-shrink: 0;
+  color: var(--tx-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -199,84 +225,84 @@ onUnmounted(() => {
 .c-path {
   flex: 1;
   min-width: 0;
-  color: #4a5568;
+  color: var(--tx-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .c-status {
-  width: 52px;
+  width: 40px;
   flex-shrink: 0;
   text-align: right;
 }
 
-.st-ok {
-  color: #2fa36b;
+.c-status.ok {
+  color: var(--ok);
 }
 
-.st-warn {
-  color: #d98b26;
+.c-status.warn {
+  color: var(--warn);
 }
 
-.st-fail {
-  color: #d05555;
+.c-status.fail {
+  color: var(--err);
 }
 
 .c-dur {
-  width: 66px;
+  width: 54px;
   flex-shrink: 0;
   text-align: right;
-  color: #b3bbc9;
+  color: var(--tx-4);
 }
 
+/* ---- 运行日志 ---- */
 .log-list {
-  background: #fff;
-  border: 1px solid #e8eaf0;
-  border-radius: 10px;
-  padding: 6px 0;
+  margin-top: 2px;
 }
 
 .log-row {
   display: flex;
   align-items: baseline;
-  gap: 10px;
-  padding: 6px 14px;
-  font-size: 12px;
-  border-bottom: 1px solid #f7f8fb;
+  gap: 12px;
+  padding: 5px 10px;
+  margin: 0 -10px;
+  font-size: 11.5px;
+  border-radius: 4px;
 }
 
-.log-row:last-child {
-  border-bottom: none;
+.log-row:hover {
+  background: var(--bg-hover);
 }
 
 .log-time {
-  color: #b3bbc9;
+  color: var(--tx-4);
   font-size: 11px;
   flex-shrink: 0;
 }
 
 .log-level {
-  width: 44px;
+  width: 42px;
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 10.5px;
   text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .lv-info {
-  color: #2fa36b;
+  color: var(--tx-4);
 }
 
 .lv-warn {
-  color: #d98b26;
+  color: var(--warn);
 }
 
 .lv-error {
-  color: #d05555;
+  color: var(--err);
 }
 
 .log-msg {
-  color: #4a5568;
+  color: var(--tx-2);
   word-break: break-all;
 }
 </style>

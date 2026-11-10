@@ -93,6 +93,7 @@ export default class Extractor {
         token: String(token),
         account: firstPick(body, def.accountPaths || []) || undefined,
         expiresAt: this.resolveExpiry(rule, body, def),
+        extra: pickExtra(body, def.extraPaths),
         source: `${record.method} ${path}`,
         at: record.at
       }
@@ -113,11 +114,14 @@ export default class Extractor {
     for (const key of keys) {
       const value = headers[key] || headers[key.toLowerCase()]
       if (!value) continue
+      // 鉴权头通常写成 "Bearer xxx"，存进去的时候必须把前缀剥掉，
+      // 否则上报给服务端的就是一段带前缀的废值
+      const token = String(value).replace(/^bearer\s+/i, '').trim()
       // 过滤掉明显不是凭证的短值（例如 token 字段被置空、占位符）
-      if (String(value).length < 8) continue
+      if (token.length < 8) continue
       return {
         ruleId: rule.id,
-        token: String(value),
+        token,
         source: `${record.method} ${record.path} (header:${key})`,
         at: record.at,
         expiresAt: null
@@ -189,6 +193,25 @@ export function firstPick(obj, paths = []) {
     if (value !== undefined && value !== null && value !== '') return value
   }
   return undefined
+}
+
+/**
+ * 提取主凭证之外的附加字段。
+ *
+ * 有些系统光有 token 不够用 —— 鲸鱼系统还得同时交出 refreshToken，
+ * 少了它服务端没法续期，token 一到期就只能等人工重新登录。
+ * 规则里用 extraPaths: { refreshToken: ['data.refreshToken'] } 声明。
+ *
+ * @returns {Object<string, string>} 没命中的字段不出现在结果里
+ */
+export function pickExtra(body, extraPaths = {}) {
+  const out = {}
+  for (const [key, paths] of Object.entries(extraPaths || {})) {
+    const value = firstPick(body, paths)
+    if (value === undefined || value === null || value === '') continue
+    out[key] = String(value)
+  }
+  return out
 }
 
 export function parseJsonSafe(text) {

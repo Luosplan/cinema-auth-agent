@@ -10,6 +10,12 @@ const routes = [
     meta: { title: '概览' }
   },
   {
+    path: '/cinemas',
+    name: 'Cinemas',
+    component: () => import('@views/cinemas.vue'),
+    meta: { title: '影城账号' }
+  },
+  {
     path: '/systems',
     name: 'Systems',
     component: () => import('@views/systems.vue'),

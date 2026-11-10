@@ -15,6 +15,7 @@ import { mergeRules } from './collectors/rules'
 import ConfigStore from './store/ConfigStore'
 import CredentialStore from './store/CredentialStore'
 import Reporter from './reporter/Reporter'
+import MemberAuth from './auth/MemberAuth'
 
 const APP_TITLE = '影票授权助手'
 const MAX_CAPTURES = 300
@@ -35,6 +36,7 @@ const ctx = {
   systemProxy: null,
   extractor: null,
   reporter: null,
+  auth: null,
   logs: [],
   captures: [],
   pendingCaptures: [],
@@ -60,7 +62,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1080,
     height: 720,
-    minWidth: 860,
+    minWidth: 900,
     minHeight: 600,
     show: false,
     autoHideMenuBar: true,
@@ -73,6 +75,8 @@ function createWindow() {
       contextIsolation: false
     }
   })
+
+  mainWindow.setMenu(null)
 
   mainWindow.on('ready-to-show', () => {
     mainWindow.setTitle(APP_TITLE)
@@ -295,7 +299,8 @@ function handleCapture(record) {
       token: hit.token,
       expiresAt: hit.expiresAt,
       source: hit.source,
-      at: hit.at
+      at: hit.at,
+      extra: hit.extra
     })
 
     if (!changed) return
@@ -311,6 +316,7 @@ function handleCapture(record) {
           taskName: rule?.name,
           account: hit.account,
           token: plain.token,
+          extras: plain.extras,
           expiresAt: hit.expiresAt,
           updatedAt: entry.updatedAt,
           source: hit.source
@@ -339,6 +345,10 @@ async function shutdown() {
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.cinemaauth.agent')
 
+  // Windows 上按一下 Alt 就会把原生菜单栏（File/Edit/View…）顶出来，
+  // 这个工具没有菜单功能，直接整条去掉，Alt 就成了空操作。
+  Menu.setApplicationMenu(null)
+
   ctx.dataDir = app.getPath('userData')
   ctx.lockFile = join(ctx.dataDir, 'proxy-active.lock')
 
@@ -361,6 +371,16 @@ app.whenReady().then(async () => {
     onLog: log,
     version: app.getVersion()
   })
+
+  // 会员登录复用 reporter 的 agentId 当 deviceId：
+  // 服务端是单设备登录模型，这个值必须一次生成、永不变化。
+  // 接口地址固定取 config/endpoints.js（会员端同一套服务端），不做用户配置项。
+  ctx.auth = new MemberAuth({
+    dir: ctx.dataDir,
+    deviceId: ctx.reporter.agentId,
+    onLog: log
+  })
+  ctx.auth.load()
 
   ctx.proxy = new MitmProxy({
     ca: ctx.ca,
@@ -396,6 +416,18 @@ app.whenReady().then(async () => {
   setInterval(() => {
     ctx.reporter.flush().catch(() => {})
   }, 60000)
+
+  // 会员会话保活：服务端是单设备会话，长时间不续期会被踢，
+  // 六小时静默续一次；断网导致的失败不清理登录态
+  if (ctx.auth.isLoggedIn()) {
+    ctx.auth.refresh().catch(() => {})
+  }
+  setInterval(
+    () => {
+      if (ctx.auth.isLoggedIn()) ctx.auth.refresh().catch(() => {})
+    },
+    6 * 3600 * 1000
+  )
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
