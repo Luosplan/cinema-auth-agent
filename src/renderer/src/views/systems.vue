@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { invoke } from '@utils/ipc'
 import { auth, loadAuth } from '../stores/auth'
 import LoginDialog from '../components/LoginDialog.vue'
+import CopyIcon from '../components/CopyIcon.vue'
 
 /**
  * 影城配置：左边出票系统，右边这套系统下的影城。
@@ -27,10 +28,24 @@ const activeSystem = computed(
 )
 const cinemas = computed(() => activeSystem.value?.children || [])
 
+/** 类型筛选：后台 accessType 写法不统一（h5 / miniapp / wx…），先收敛成两个值 */
+function typeKeyOf(cinema) {
+  const raw = String(cinema?.accessType || '').toLowerCase()
+  if (raw === 'h5') return 'h5'
+  if (raw === 'miniapp' || raw === 'miniprogram' || raw === 'wx') return 'miniapp'
+  return ''
+}
+
+const typeFilter = ref('')
+
 const filtered = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
-  if (!kw) return cinemas.value
-  return cinemas.value.filter((c) => String(c.name || '').toLowerCase().includes(kw))
+  const type = typeFilter.value
+  return cinemas.value.filter((c) => {
+    if (type && typeKeyOf(c) !== type) return false
+    if (!kw) return true
+    return String(c.name || '').toLowerCase().includes(kw)
+  })
 })
 
 /** 一套系统下所有影城共用一个抓包规则，取第一个影城的 systemCode 即可 */
@@ -66,14 +81,14 @@ async function loadRules() {
 
 /* ---- 入口展示 ---- */
 function typeText(cinema) {
-  const raw = String(cinema?.accessType || '').toLowerCase()
-  if (raw === 'h5') return 'H5'
-  if (raw === 'miniapp' || raw === 'miniprogram' || raw === 'wx') return '小程序'
+  const key = typeKeyOf(cinema)
+  if (key === 'h5') return 'H5'
+  if (key === 'miniapp') return '小程序'
   return cinema?.accessType || '—'
 }
 
 function isMini(cinema) {
-  return String(cinema?.accessType || '').toLowerCase() === 'miniapp'
+  return typeKeyOf(cinema) === 'miniapp'
 }
 
 function entryUrlOf(cinema) {
@@ -87,6 +102,42 @@ function appIdOf(cinema) {
 /** 本机改过就标一下，避免和后台配的入口混淆 */
 function isOverridden(cinema) {
   return Boolean(cinema?.entry && (cinema.entry.url || cinema.entry.appid))
+}
+
+/** file:// 下 navigator.clipboard 不可用，退回 textarea + execCommand */
+async function writeClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      const ok = document.execCommand('copy')
+      document.body.removeChild(ta)
+      return ok
+    } catch {
+      return false
+    }
+  }
+}
+
+async function copyName(cinema) {
+  const name = String(cinema?.name || '').trim()
+  if (!name) return ElMessage.warning('该影城没有名称')
+  const ok = await writeClipboard(name)
+  ok ? ElMessage.success(`已复制 ${name}`) : ElMessage.warning('剪贴板不可用，请检查系统权限')
+}
+
+async function copyLink(cinema) {
+  const url = entryUrlOf(cinema)
+  if (!url) return ElMessage.warning('这家影城还没有入口链接')
+  const ok = await writeClipboard(url)
+  ok ? ElMessage.success('已复制入口链接') : ElMessage.warning('剪贴板不可用，请检查系统权限')
 }
 
 /* ---- 访问 / 编辑 ---- */
@@ -145,6 +196,11 @@ onMounted(async () => {
     <div class="head">
       <h1 class="head-title">影城配置</h1>
       <div class="head-actions">
+        <el-select v-model="typeFilter" size="small" class="type-filter" placeholder="全部类型">
+          <el-option label="全部类型" value="" />
+          <el-option label="H5" value="h5" />
+          <el-option label="小程序" value="miniapp" />
+        </el-select>
         <el-input
           v-model="keyword"
           size="small"
@@ -202,9 +258,9 @@ onMounted(async () => {
           <div class="table-wrap">
             <table>
               <colgroup>
-                <col style="width: 29%" />
+                <col style="width: 32%" />
                 <col style="width: 11%" />
-                <col style="width: 30%" />
+                <col style="width: 27%" />
                 <col style="width: 15%" />
                 <col style="width: 15%" />
               </colgroup>
@@ -222,13 +278,40 @@ onMounted(async () => {
                   <td>
                     <div class="name-inner">
                       <span class="name" :title="cinema.name">{{ cinema.name }}</span>
-                      <span v-if="isOverridden(cinema)" class="tag">本机</span>
+                      <span
+                        v-if="isOverridden(cinema)"
+                        class="dot"
+                        title="入口已在本机覆盖"
+                      />
+                      <button
+                        class="copy-btn"
+                        type="button"
+                        title="复制影城名称"
+                        aria-label="复制影城名称"
+                        @click="copyName(cinema)"
+                      >
+                        <CopyIcon />
+                      </button>
                     </div>
                   </td>
                   <td class="center">{{ typeText(cinema) }}</td>
-                  <td class="mono url" :title="entryUrlOf(cinema)">
-                    <span v-if="entryUrlOf(cinema)">{{ entryUrlOf(cinema) }}</span>
-                    <span v-else class="dim">未设置</span>
+                  <td class="mono url">
+                    <div class="url-inner">
+                      <span v-if="entryUrlOf(cinema)" :title="entryUrlOf(cinema)">
+                        {{ entryUrlOf(cinema) }}
+                      </span>
+                      <span v-else class="dim">未设置</span>
+                      <button
+                        v-if="entryUrlOf(cinema)"
+                        class="copy-btn"
+                        type="button"
+                        title="复制入口链接"
+                        aria-label="复制入口链接"
+                        @click="copyLink(cinema)"
+                      >
+                        <CopyIcon />
+                      </button>
+                    </div>
                   </td>
                   <td class="mono appid" :title="appIdOf(cinema)">
                     <span v-if="appIdOf(cinema)">{{ appIdOf(cinema) }}</span>
@@ -329,6 +412,11 @@ onMounted(async () => {
 
 .search {
   width: 200px;
+}
+
+.type-filter {
+  width: 112px;
+  flex: none;
 }
 
 .placeholder {
@@ -520,15 +608,61 @@ tbody tr:hover td {
   white-space: nowrap;
 }
 
-/* 「本机」标记：提醒这条入口是采集端改过的，不是后台配置 */
-.tag {
+/* 本机覆盖标记：用小圆点而不是文字标签，省出宽度给影城名（tooltip 里有说明） */
+.dot {
   flex-shrink: 0;
-  padding: 0 5px;
-  border-radius: 4px;
-  font-size: 10px;
-  line-height: 16px;
-  color: var(--tx-3);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--tx-3);
+}
+
+/* 复制按钮：平时很淡，悬停才显形，不抢内容 */
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--tx-4);
+  cursor: pointer;
+  transition:
+    color 0.12s ease,
+    background 0.12s ease;
+}
+
+.copy-btn:hover {
+  color: var(--tx);
   background: var(--bg-hover);
+}
+
+.copy-btn svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.url-inner {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.url-inner > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .url {
