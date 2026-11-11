@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { invoke } from '@utils/ipc'
 import { auth, loadAuth } from '../stores/auth'
@@ -12,9 +12,6 @@ import LoginDialog from '../components/LoginDialog.vue'
  *   - 类型（H5 / 小程序）来自后台，决定用哪套适配器，这里只读；
  *   - 入口链接 / 小程序 appId 可以按影城覆盖，保存在本机。
  * 打开顺序：本机覆盖 > 后台给这家影城配的 accessUrl > 这套程序的公共入口。
- *
- * 另外保留每个系统的「采集域名」——只有列出的域名会被解密，
- * 域名是系统级的，所以放在右栏顶部，跟着左边的系统切换。
  */
 
 const tree = ref([])
@@ -65,54 +62,6 @@ async function loadTree() {
 
 async function loadRules() {
   rules.value = (await invoke('rules:list')) || []
-}
-
-/* ---- 采集域名（系统级） ---- */
-const hosts = ref([])
-const hostsSaved = ref('')
-const hostInput = ref('')
-const savingHosts = ref(false)
-
-function syncHosts() {
-  hosts.value = [...(activeRule.value?.hosts || [])]
-  hostsSaved.value = hosts.value.join('|')
-  hostInput.value = ''
-}
-
-const hostsDirty = computed(() => hosts.value.join('|') !== hostsSaved.value)
-
-function addHost() {
-  const value = hostInput.value.trim().toLowerCase()
-  if (!value) return
-  if (!/^[a-z0-9*.-]+$/.test(value)) {
-    ElMessage.warning('域名格式不正确')
-    return
-  }
-  if (hosts.value.includes(value)) {
-    ElMessage.warning('该域名已存在')
-    return
-  }
-  hosts.value.push(value)
-  hostInput.value = ''
-}
-
-function removeHost(host) {
-  const idx = hosts.value.indexOf(host)
-  if (idx > -1) hosts.value.splice(idx, 1)
-}
-
-async function saveHosts() {
-  if (!systemCode.value) return
-  savingHosts.value = true
-  try {
-    await invoke('config:update', { rules: { [systemCode.value]: { hosts: hosts.value } } })
-    ElMessage.success('域名已保存，立即生效')
-    await loadRules()
-  } catch (e) {
-    ElMessage.error(`保存失败：${e.message}`)
-  } finally {
-    savingHosts.value = false
-  }
 }
 
 /* ---- 入口展示 ---- */
@@ -184,8 +133,6 @@ async function saveEntry() {
   ElMessage.success(res.entry ? '已保存到本机' : '已清空，改回使用后台配置的入口')
 }
 
-watch([systemCode, rules], syncHosts, { immediate: true })
-
 onMounted(async () => {
   await loadAuth()
   await loadRules()
@@ -210,7 +157,7 @@ onMounted(async () => {
     </div>
 
     <div v-if="!auth.loggedIn" class="placeholder">
-      <div class="placeholder-text">登录会员账号后可配置影城入口与采集域名</div>
+      <div class="placeholder-text">登录会员账号后可配置各影城的入口</div>
       <el-button size="small" type="primary" @click="loginOpen = true">登录</el-button>
     </div>
 
@@ -250,45 +197,8 @@ onMounted(async () => {
           <div class="systems-foot">共 {{ cinemas.length }} 家影城</div>
         </aside>
 
-        <!-- 右：该系统下的影城 + 采集域名 -->
+        <!-- 右：该系统下的影城 -->
         <div class="right">
-          <div class="hosts">
-            <span class="hosts-label">采集域名</span>
-            <div class="hosts-body">
-              <template v-if="activeRule">
-                <div class="host-tags">
-                  <span v-for="host in hosts" :key="host" class="host">
-                    <span class="mono">{{ host }}</span>
-                    <button class="host-x" title="移除" @click="removeHost(host)">×</button>
-                  </span>
-                  <span v-if="!hosts.length" class="host-empty">尚未添加，采集不会生效</span>
-                </div>
-                <div class="host-add">
-                  <el-input
-                    v-model="hostInput"
-                    size="small"
-                    placeholder="app.example.com"
-                    class="host-input"
-                    @keyup.enter="addHost"
-                  />
-                  <el-button size="small" @click="addHost">添加</el-button>
-                  <el-button
-                    size="small"
-                    type="primary"
-                    :loading="savingHosts"
-                    :disabled="!hostsDirty"
-                    @click="saveHosts"
-                  >
-                    保存
-                  </el-button>
-                </div>
-              </template>
-              <span v-else class="host-empty">
-                这套系统还没有抓包规则，采集域名暂不可配置
-              </span>
-            </div>
-          </div>
-
           <div class="table-wrap">
             <table>
               <colgroup>
@@ -533,86 +443,6 @@ onMounted(async () => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-}
-
-/* 域名是系统级的，放表格上方，跟着左边的系统切 */
-.hosts {
-  display: flex;
-  gap: 12px;
-  padding: 0 26px 12px 16px;
-}
-
-.hosts-label {
-  flex-shrink: 0;
-  padding-top: 4px;
-  font-size: 11.5px;
-  color: var(--tx-4);
-}
-
-.hosts-body {
-  flex: 1;
-  min-width: 0;
-}
-
-.host-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-height: 22px;
-  align-items: center;
-}
-
-.host {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  height: 22px;
-  padding: 0 4px 0 7px;
-  font-size: 11.5px;
-  border-radius: 4px;
-  color: var(--tx-2);
-  background: var(--bg-hover);
-}
-
-.host-x {
-  width: 15px;
-  height: 15px;
-  padding: 0;
-  border: none;
-  border-radius: 3px;
-  background: transparent;
-  color: var(--tx-4);
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.host-x:hover {
-  background: rgba(0, 0, 0, 0.07);
-  color: var(--tx);
-}
-
-.host-empty {
-  font-size: 11.5px;
-  color: var(--tx-4);
-}
-
-.host-add {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 8px;
-}
-
-.host-input {
-  width: 220px;
-}
-
-.host-add .el-button {
-  height: 26px;
 }
 
 /* ---- 表格 ---- */
