@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { invoke, on } from '@utils/ipc'
 import { auth, loadAuth } from '../stores/auth'
@@ -177,7 +177,7 @@ async function openParam(cinema) {
   dialogCinema.value = cinema
   // 每次打开都是「这次抓到的」，不要把上一家的值带过来
   paramValues.value = {}
-  paramFrom.value = {}
+  manualKeys.clear()
   paramHint.value = ''
   paramPageUrl.value = ''
   paramPageError.value = ''
@@ -261,13 +261,33 @@ const dialogEntry = computed(() => {
 
 /** 抓包拿到的值，key → value；打开弹窗时清空，点「获取参数」才填 */
 const paramValues = ref({})
-/** key → 取值来源，标在值后面：同名字段可能来自 cookie、请求头或某个响应体，看不出处没法排错 */
-const paramFrom = ref({})
+/**
+ * 被手工改过的字段。
+ *
+ * 采集是持续的，值会陆续推回来；如果人工改完又被推送覆盖，等于白改。
+ * 所以改过的字段记在这里，后续推送一律不碰它 —— 人工判断优先于自动抓取。
+ */
+const manualKeys = reactive(new Set())
+function markManual(key) {
+  manualKeys.add(key)
+}
+/** 合并推送/结果时剥掉人工改过的字段：人工填的优先，不能被自动抓回来的值冲掉 */
+function withoutManual(values) {
+  if (!values) return {}
+  const out = {}
+  for (const [key, value] of Object.entries(values)) {
+    if (manualKeys.has(key)) continue
+    out[key] = value
+  }
+  return out
+}
 /** 打开入口的结果提示（唤起微信 / 已开 H5 窗口 / 没有入口） */
 const paramHint = ref('')
 const capturing = ref(false)
-/** 已经抓到几个：按钮和提示里实时反映进度，不然操作员不知道该不该继续等 */
-const capturedCount = computed(() => Object.keys(paramValues.value).length)
+/** 已经抓到几个（空值不算）：按钮和提示里实时反映进度，不然操作员不知道该不该继续等 */
+const capturedCount = computed(
+  () => Object.keys(paramValues.value).filter((key) => paramValues.value[key]).length
+)
 
 /** 弹窗里嵌入的入口页面地址：就是这家影城自己的 accessUrl，不是系统域名 */
 const paramPageUrl = ref('')
@@ -378,10 +398,10 @@ async function captureParams() {
     }
     if (Array.isArray(res.rows) && res.rows.length) liveRows.value = res.rows
     // 推送是增量的，这里再兜一次底：推送丢了也能拿到最终结果
-    paramValues.value = { ...paramValues.value, ...(res.values || {}) }
-    paramFrom.value = { ...paramFrom.value, ...(res.from || {}) }
+    // 人工改过的字段不参与合并，否则刚改完就被结果覆盖
+    paramValues.value = { ...paramValues.value, ...withoutManual(res.values) }
 
-    const got = Object.keys(paramValues.value).length
+    const got = capturedCount.value
     // 收工原因说清楚：抓齐了就报喜，没抓齐就说明还剩哪些要人工补
     if (!keys.length) {
       paramHint.value = res.message || '该程序没有声明抓包字段，入口已打开'
@@ -393,7 +413,7 @@ async function captureParams() {
       // 主进程只知道 key，弹窗里说的是 label（member_cost → 会员成本），翻译一下再给人看
       const labelOf = (key) => rows.find((row) => row.key === key)?.label || key
       const names = res.missing.map(labelOf).join('、')
-      paramHint.value = `已抓 ${got} 个，还有 ${res.missing.length} 个没抓到（${names}），可能需要人工填写`
+      paramHint.value = `已抓 ${got} 个参数，还有 ${res.missing.length} 个没抓到（${names}），可能需要人工填写`
       ElMessage.warning(paramHint.value)
     } else {
       paramHint.value = `已抓齐 ${got} 个参数`
@@ -448,8 +468,7 @@ onMounted(async () => {
   offParamUpdate = on('param-capture:update', (payload) => {
     // 弹窗没开或已经停了就不往界面上糊数据
     if (!paramDialog.value || !capturing.value) return
-    if (payload?.values) paramValues.value = { ...paramValues.value, ...payload.values }
-    if (payload?.from) paramFrom.value = { ...paramFrom.value, ...payload.from }
+    if (payload?.values) paramValues.value = { ...paramValues.value, ...withoutManual(payload.values) }
   })
 })
 
@@ -648,12 +667,14 @@ onUnmounted(() => {
               <tbody>
                 <tr v-for="row in dialogParamRows" :key="row.key">
                   <td :title="row.label">{{ row.label }}</td>
-                  <td class="mono p-val" :title="paramValues[row.key] || ''">
-                    <template v-if="paramValues[row.key]">
-                      <span class="p-text">{{ paramValues[row.key] }}</span>
-                      <span v-if="paramFrom[row.key]" class="p-src">{{ paramFrom[row.key] }}</span>
-                    </template>
-                    <span v-else class="dim">—</span>
+                  <td class="p-val">
+                    <el-input
+                      v-model="paramValues[row.key]"
+                      size="small"
+                      placeholder="—"
+                      :title="paramValues[row.key] || ''"
+                      @input="markManual(row.key)"
+                    />
                   </td>
                   <td class="p-required">
                     <span v-if="row.required === true" class="p-yes">是</span>
@@ -1183,7 +1204,8 @@ tbody tr:hover td {
 }
 
 .param-table th.p-name {
-  width: 30%;
+  /* 字段名最长也就四个字（会员成本），把宽度让给值列 —— _m_h5_tk 有 60 多个字符 */
+  width: 88px;
 }
 
 .param-table th.p-required {
@@ -1200,29 +1222,38 @@ tbody tr:hover td {
   max-width: 240px;
 }
 
+/* 值列单独放开：长 token 尽量一行看全，剩下的靠输入框内滚动 */
+.param-table tbody td.p-val {
+  max-width: none;
+}
+
 .p-val {
   color: var(--tx);
 }
 
-/* 值 + 来源并排：来源要弱到不抢值，但扫一眼就知道这个值是哪儿来的 */
-.p-val .p-text {
-  display: inline-block;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  vertical-align: bottom;
+/*
+ * 参数值直接给输入框：抓到的值经常还要改（截断的、要换账号的），
+ * 让运营点一下就能改，比「复制出去再粘回来」顺手得多。
+ */
+.p-val :deep(.el-input__wrapper) {
+  padding: 0 6px;
+  background: transparent;
 }
 
-.p-val .p-src {
-  margin-left: 6px;
-  padding: 0 5px;
-  border-radius: 4px;
+/* 平时不画边框（表格里一排框太吵），聚焦时保留 Element 自带的高亮环 */
+.p-val :deep(.el-input__wrapper:not(.is-focus)) {
+  box-shadow: none;
+}
+
+.p-val :deep(.el-input__wrapper:hover) {
   background: var(--bg-panel);
-  font-family: inherit;
-  font-size: 10px;
-  color: var(--tx-4);
-  vertical-align: bottom;
+}
+
+.p-val :deep(.el-input__inner) {
+  height: 22px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--tx);
 }
 
 /* 必填的「是」给正文色，否 / 未标注压淡——一眼能看出哪些字段不能漏 */

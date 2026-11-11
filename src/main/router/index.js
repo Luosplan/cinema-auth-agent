@@ -417,13 +417,14 @@ routers.push(
           /* 挂不上就只靠抓包 */
         }
       }
-      storageReads += 1
       try {
         const res = await ctx.readPageStorage(pageId)
         if (!res.ok) {
+          // 读失败不计入次数：下一轮还得接着试，否则要干等三轮才重试
           storageState = res.message
           return
         }
+        storageReads += 1
         storageState = `已读 ${storageReads} 次`
         const record = ctx.storageToRecord(res.data)
         const rest = keys.filter((key) => !strict.has(key) && (rank[key] || 0) < 2)
@@ -484,9 +485,10 @@ routers.push(
       }
       await new Promise((resolve) => setTimeout(resolve, 700))
       scanNew()
-      // 存储里不会自己变，隔几轮读一次即可，别把页面卡住
+      // 还没成功读过一次就每轮都试（点下去那一刻内嵌页可能还没创建）；
+      // 读过之后存储不会自己变，隔几轮再读即可
       loopIdx += 1
-      if (loopIdx % 3 === 0) await scanStorage()
+      if (!storageReads || loopIdx % 3 === 0) await scanStorage()
       notify()
     }
 
