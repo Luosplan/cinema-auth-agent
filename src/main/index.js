@@ -194,13 +194,12 @@ function updateTrayMenu() {
  *      不能直达某个页面，微信侧通常回「当前页面无法访问」—— 这条只是尽力而为的兜底。
  */
 function openEntry(rule, cinema = {}) {
-  // 本机覆盖 > 后台给这家影城配的 accessUrl > 这套程序的公共入口
-  const override = cinema.entry || {}
-  const accessUrl = String(override.url || cinema.accessUrl || '').trim()
+  // 影城自己的入口（后台 accessUrl / accessAppId）> 这套程序的公共入口
+  const accessUrl = String(cinema.accessUrl || '').trim()
   const accessType = String(cinema.accessType || '').toLowerCase()
   const ruleUrl = String(rule?.launch?.url || '').trim()
   const url = accessUrl || ruleUrl
-  const appid = String(override.appid || rule?.launch?.appid || '').trim()
+  const appid = String(cinema.accessAppId || rule?.launch?.appid || '').trim()
 
   // 有 H5 地址就开窗，不管 accessType 写的是什么：能进页面才有流量
   if (url) {

@@ -11,8 +11,9 @@ import CopyIcon from '../components/CopyIcon.vue'
  *
  * 每行能改的是「怎么打开这家影城」：
  *   - 类型（H5 / 小程序）来自后台，决定用哪套适配器，这里只读；
- *   - 入口链接 / 小程序 appId 可以按影城覆盖，保存在本机。
- * 打开顺序：本机覆盖 > 后台给这家影城配的 accessUrl > 这套程序的公共入口。
+ *   - 入口链接 / 小程序 appId 也存服务端（CinemaGroup.accessUrl / accessAppId），
+ *     所有采集机共用一份。
+ * 打开顺序：影城的 accessUrl / accessAppId > 这套程序的公共入口。
  */
 
 const tree = ref([])
@@ -92,16 +93,12 @@ function isMini(cinema) {
 }
 
 function entryUrlOf(cinema) {
-  return cinema?.entry?.url || cinema?.accessUrl || ''
+  return cinema?.accessUrl || ''
 }
 
+/** 影城自己没配 appId 时，回落到这套程序的公共 appId */
 function appIdOf(cinema) {
-  return cinema?.entry?.appid || (isMini(cinema) ? activeRule.value?.launch?.appid || '' : '')
-}
-
-/** 本机改过就标一下，避免和后台配的入口混淆 */
-function isOverridden(cinema) {
-  return Boolean(cinema?.entry && (cinema.entry.url || cinema.entry.appid))
+  return cinema?.accessAppId || (isMini(cinema) ? activeRule.value?.launch?.appid || '' : '')
 }
 
 /** file:// 下 navigator.clipboard 不可用，退回 textarea + execCommand */
@@ -148,7 +145,7 @@ async function visit(cinema) {
       name: cinema.name,
       accessType: cinema.accessType,
       accessUrl: cinema.accessUrl,
-      entry: cinema.entry || null
+      accessAppId: cinema.accessAppId
     }
   })
   if (!res?.ok) ElMessage.error(res?.message || '打不开这家影城的入口')
@@ -163,7 +160,7 @@ const form = reactive({ url: '', appid: '' })
 function openEdit(cinema) {
   editing.value = cinema
   form.url = entryUrlOf(cinema)
-  form.appid = cinema?.entry?.appid || (isMini(cinema) ? activeRule.value?.launch?.appid || '' : '')
+  form.appid = cinema?.accessAppId || ''
   editOpen.value = true
 }
 
@@ -179,9 +176,10 @@ async function saveEntry() {
     ElMessage.error(res?.message || '保存失败')
     return
   }
-  cinema.entry = res.entry || null
+  cinema.accessUrl = res.entry?.url || ''
+  cinema.accessAppId = res.entry?.appid || ''
   editOpen.value = false
-  ElMessage.success(res.entry ? '已保存到本机' : '已清空，改回使用后台配置的入口')
+  ElMessage.success('已保存到服务器')
 }
 
 onMounted(async () => {
@@ -278,11 +276,6 @@ onMounted(async () => {
                   <td>
                     <div class="name-inner">
                       <span class="name" :title="cinema.name">{{ cinema.name }}</span>
-                      <span
-                        v-if="isOverridden(cinema)"
-                        class="dot"
-                        title="入口已在本机覆盖"
-                      />
                       <button
                         class="copy-btn"
                         type="button"
@@ -366,8 +359,7 @@ onMounted(async () => {
           <el-input v-model="form.appid" size="small" clearable placeholder="wx0123456789abcdef" />
         </div>
         <p class="dlg-tip">
-          保存在本机，不影响后台配置。两项都留空即改回使用后台给这家影城配的入口。
-          打开顺序：本机设置 → 后台入口 → 这套程序的公共入口。
+          保存到服务器，所有采集机共用。两项都留空即清除，改回用这套程序的公共入口。
         </p>
       </div>
 
@@ -608,14 +600,6 @@ tbody tr:hover td {
   white-space: nowrap;
 }
 
-/* 本机覆盖标记：用小圆点而不是文字标签，省出宽度给影城名（tooltip 里有说明） */
-.dot {
-  flex-shrink: 0;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--tx-3);
-}
 
 /* 复制按钮：平时很淡，悬停才显形，不抢内容 */
 .copy-btn {

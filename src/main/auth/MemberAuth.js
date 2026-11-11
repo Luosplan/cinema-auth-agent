@@ -141,13 +141,13 @@ export default class MemberAuth {
     }
   }
 
-  async request(pathname, body, token) {
+  async request(pathname, body, token, method = 'POST') {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 15000)
     let res
     try {
       res = await fetch(this.apiBase + pathname, {
-        method: 'POST',
+        method,
         headers: {
           'content-type': 'application/json',
           ...(token ? { authorization: `Bearer ${token}` } : {})
@@ -217,6 +217,16 @@ export default class MemberAuth {
       throw err
     }
     return json.data || {}
+  }
+
+  /**
+   * 写接口（当前只有保存出票程序入口），自动带会员 token。
+   * 目标接口就是后台现成的「编辑出票程序」，响应包一致，直接复用。
+   */
+  async put(pathname, body) {
+    const token = this.getToken()
+    if (!token) throw new Error('未登录')
+    return this.request(pathname, body, token, 'PUT')
   }
 
   /**

@@ -61,18 +61,10 @@ routers.push(
     const { ctx } = api
     try {
       const data = await ctx.auth.get('/web/cinema-accounts/group-tree')
-      // 入口链接/appId 允许每台采集机自己覆盖（比如某家后台没配、或小程序要指定 appid）
-      const entries = ctx.config.get('cinemas.entry') || {}
-      const tree = (data.tree || []).map((sys) => ({
-        ...sys,
-        children: (sys.children || []).map((c) => ({
-          ...c,
-          entry: entries[c.id] || null
-        }))
-      }))
       return {
         ok: true,
-        tree,
+        // 入口（accessUrl / accessAppId）由服务端随树带回来，不再本地覆盖
+        tree: data.tree || [],
         autoRenew: ctx.config.get('cinemas.autoRenew') || {}
       }
     } catch (e) {
@@ -82,24 +74,31 @@ routers.push(
 )
 
 /**
- * 保存某家影城的入口（本机覆盖）。
- * 只存「怎么打开」，不改后台的 accessType —— 类型决定用哪套适配器，不能让采集端改。
+ * 保存某家影城的入口 —— 直接调后台现成的「编辑出票程序」接口。
+ *
+ * 入口链接（accessUrl / accessAppId）本来就是这个出票程序自己的字段，
+ * 后台 `PUT /admin/cinema/cinemaGroups/:id` 早就在维护它们，会员端不需要再开一条写接口。
+ * 这里只带这两项，accessType / protocol / ticketParams 一个都不传 ——
+ * 那些是出票程序的身份，采集端无权也不该改。
  */
 routers.push(
   new EventRoute('cinemas:entry:set', 'invoke', async (api, data) => {
     const params = data.params || {}
-    const id = Number(params.cinemaGroupId || 0)
-    if (!id) return { ok: false, message: '缺少影城 ID' }
+    const cinemaGroupId = Number(params.cinemaGroupId || 0)
+    if (!cinemaGroupId) return { ok: false, message: '缺少影城 ID' }
 
-    const map = { ...(api.ctx.config.get('cinemas.entry') || {}) }
-    const url = String(params.url || '').trim()
-    const appid = String(params.appid || '').trim()
-
-    if (!url && !appid) delete map[id]
-    else map[id] = { ...(url ? { url } : {}), ...(appid ? { appid } : {}) }
-
-    api.ctx.config.set('cinemas.entry', map)
-    return { ok: true, entry: map[id] || null }
+    try {
+      const row = await api.ctx.auth.put(`/admin/cinema/cinemaGroups/${cinemaGroupId}`, {
+        accessUrl: params.url || null,
+        accessAppId: params.appid || null
+      })
+      return {
+        ok: true,
+        entry: { url: row.accessUrl || '', appid: row.accessAppId || '' }
+      }
+    } catch (e) {
+      return { ok: false, message: e.message, status: e.status || 0 }
+    }
   })
 )
 
