@@ -413,7 +413,7 @@ async function captureParams() {
       // 主进程只知道 key，弹窗里说的是 label（member_cost → 会员成本），翻译一下再给人看
       const labelOf = (key) => rows.find((row) => row.key === key)?.label || key
       const names = res.missing.map(labelOf).join('、')
-      paramHint.value = `已抓 ${got} 个参数，还有 ${res.missing.length} 个没抓到（${names}），可能需要人工填写`
+      paramHint.value = `已抓 ${got} 个参数`
       ElMessage.warning(paramHint.value)
     } else {
       paramHint.value = `已抓齐 ${got} 个参数`
