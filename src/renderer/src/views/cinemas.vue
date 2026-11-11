@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { ElMessage } from 'element-plus'
 import { invoke, on } from '@utils/ipc'
 import { auth, loadAuth } from '../stores/auth'
-import { activeSystemId, ensureSystem, selectSystem } from '../stores/activeSystem'
+import { activeSystemId, ensureSystem, selectSystem, consumePendingParam } from '../stores/activeSystem'
 import LoginDialog from '../components/LoginDialog.vue'
 import CopyIcon from '../components/CopyIcon.vue'
 
@@ -13,6 +13,8 @@ const accountsMap = ref({})
 const keyword = ref('')
 /** 接入方式筛选：'' 全部 / h5 / miniapp */
 const typeFilter = ref('')
+/** 账号配置筛选：'' 全部 / has 已有账号 / none 未配置账号 */
+const accountFilter = ref('')
 const loading = ref(false)
 const accountsLoading = ref(false)
 const error = ref('')
@@ -42,6 +44,9 @@ const filteredCinemas = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
   return cinemas.value.filter((c) => {
     if (typeFilter.value && typeOf(c) !== typeFilter.value) return false
+    const n = accountsMap.value[c.id]?.length || 0
+    if (accountFilter.value === 'has' && !n) return false
+    if (accountFilter.value === 'none' && n) return false
     if (!kw) return true
     if (String(c.name || '').toLowerCase().includes(kw)) return true
     return (accountsMap.value[c.id] || []).some((a) =>
@@ -598,6 +603,19 @@ onMounted(async () => {
   await loadAuth()
   if (auth.loggedIn) await reload()
 
+  // 影城配置页点「账号」跳过来的：树拉完了才找得到这家影城，选中它所在的系统并打开参数弹窗
+  const pending = consumePendingParam()
+  if (auth.loggedIn && pending?.id) {
+    const sys = tree.value.find((s) => (s.children || []).some((c) => c.id === pending.id))
+    const target = sys?.children?.find((c) => c.id === pending.id)
+    if (sys && target) {
+      selectSystem(sys.id)
+      // 弹窗里要显示已有账号，先把这家的账号拉回来
+      await loadAccounts([target])
+      openParam(target)
+    }
+  }
+
   offParamUpdate = on('param-capture:update', (payload) => {
     // 弹窗没开或已经停了就不往界面上糊数据
     if (!paramDialog.value || !capturing.value) return
@@ -615,6 +633,16 @@ onUnmounted(() => {
     <div class="head">
       <h1 class="head-title">影城账号</h1>
       <div class="head-actions">
+        <el-select
+          v-model="accountFilter"
+          size="small"
+          placeholder="账号"
+          class="type-filter"
+        >
+          <el-option label="全部影城" value="" />
+          <el-option label="已有账号" value="has" />
+          <el-option label="未配置账号" value="none" />
+        </el-select>
         <el-select
           v-model="typeFilter"
           size="small"

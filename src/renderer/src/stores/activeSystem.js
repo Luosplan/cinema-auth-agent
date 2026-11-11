@@ -57,4 +57,22 @@ function persist(id) {
   }
 }
 
-export default { activeSystemId, selectSystem, ensureSystem }
+/**
+ * 跨页跳转寄存位：影城配置页点「账号」→ 影城账号页直接打开这家影城的参数弹窗。
+ * 目标页要等路由切换后才挂载、树也还没拉回来，没法当场调用，
+ * 只能先把「要打开谁」寄存在这里，目标页加载完树再取走（一次性）。
+ */
+export const pendingParamCinema = ref(null)
+
+export function requestOpenParam(cinema) {
+  pendingParamCinema.value = cinema || null
+}
+
+/** 取走并清空，保证只生效一次 */
+export function consumePendingParam() {
+  const cinema = pendingParamCinema.value
+  pendingParamCinema.value = null
+  return cinema
+}
+
+export default { activeSystemId, selectSystem, ensureSystem, pendingParamCinema, requestOpenParam, consumePendingParam }

@@ -1,9 +1,10 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { invoke } from '@utils/ipc'
 import { auth, loadAuth } from '../stores/auth'
-import { activeSystemId, ensureSystem, selectSystem } from '../stores/activeSystem'
+import { activeSystemId, ensureSystem, selectSystem, requestOpenParam } from '../stores/activeSystem'
 import LoginDialog from '../components/LoginDialog.vue'
 import CopyIcon from '../components/CopyIcon.vue'
 
@@ -144,7 +145,7 @@ async function copyAppId(cinema) {
   ok ? ElMessage.success(`已复制 ${appid}`) : ElMessage.warning('剪贴板不可用，请检查系统权限')
 }
 
-/* ---- 访问 / 编辑 ---- */
+/* ---- 访问 / 账号 ---- */
 async function visit(cinema) {
   const res = await invoke('cinemas:entry:open', {
     systemCode: cinema.systemCode || systemCode.value,
@@ -160,33 +161,15 @@ async function visit(cinema) {
   else ElMessage.success('已打开入口')
 }
 
-const editOpen = ref(false)
-const editing = ref(null)
-const form = reactive({ url: '', appid: '' })
+const router = useRouter()
 
-function openEdit(cinema) {
-  editing.value = cinema
-  form.url = entryUrlOf(cinema)
-  form.appid = cinema?.accessAppId || ''
-  editOpen.value = true
-}
-
-async function saveEntry() {
-  const cinema = editing.value
-  if (!cinema) return
-  const res = await invoke('cinemas:entry:set', {
-    cinemaGroupId: cinema.id,
-    url: form.url,
-    appid: isMini(cinema) ? form.appid : ''
-  })
-  if (!res?.ok) {
-    ElMessage.error(res?.message || '保存失败')
-    return
-  }
-  cinema.accessUrl = res.entry?.url || ''
-  cinema.accessAppId = res.entry?.appid || ''
-  editOpen.value = false
-  ElMessage.success('已保存到服务器')
+/**
+ * 「账号」：跳到影城账号页并直接打开这家影城的参数弹窗，
+ * 采集账号 / 抓包参数都在那边完成，这里只保留「访问」入口。
+ */
+function goAccount(cinema) {
+  requestOpenParam(cinema)
+  router.push('/cinemas')
 }
 
 onMounted(async () => {
@@ -334,7 +317,7 @@ onMounted(async () => {
                   </td>
                   <td class="ops">
                     <button class="op-link" @click="visit(cinema)">访问</button>
-                    <button class="op-link" @click="openEdit(cinema)">编辑</button>
+                    <button class="op-link" @click="goAccount(cinema)">账号</button>
                   </td>
                 </tr>
                 <tr v-if="!filtered.length">
@@ -350,46 +333,6 @@ onMounted(async () => {
     </template>
 
     <LoginDialog v-model="loginOpen" @success="loadTree" />
-
-    <!-- 编辑入口：类型由后台决定，只改「怎么打开」 -->
-    <el-dialog
-      v-model="editOpen"
-      :title="editing ? `影城入口 · ${editing.name}` : '影城入口'"
-      width="520px"
-      align-center
-    >
-      <div v-if="editing" class="dlg">
-        <div class="dlg-row">
-          <span class="k">类型</span>
-          <span class="v">{{ typeText(editing) }}（由后台决定，不可改）</span>
-        </div>
-        <div class="dlg-row">
-          <span class="k">链接</span>
-          <el-input
-            v-model="form.url"
-            size="small"
-            clearable
-            :placeholder="
-              isMini(editing)
-                ? '小程序链接 / 短链，可留空'
-                : 'https://h5.example.com/ticket'
-            "
-          />
-        </div>
-        <div v-if="isMini(editing)" class="dlg-row">
-          <span class="k">appId</span>
-          <el-input v-model="form.appid" size="small" clearable placeholder="wx0123456789abcdef" />
-        </div>
-        <p class="dlg-tip">
-          保存到服务器，所有采集机共用。两项都留空即清除，改回用这套程序的公共入口。
-        </p>
-      </div>
-
-      <template #footer>
-        <el-button size="small" @click="editOpen = false">取消</el-button>
-        <el-button size="small" type="primary" @click="saveEntry">保存</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
