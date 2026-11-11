@@ -102,7 +102,7 @@ routers.push(
 /**
  * 参数弹窗的「获取参数」。
  *
- * 一条完整链路是：打开入口 → 代理在跑 → 等操作员登录 → 从流量里捞值。
+ * 一条完整链路是：代理先跑 → 打开入口 → 等操作员登录 → 从流量里捞值。
  * 参数只能来自真实流量，所以「打开」不是可选步骤而是一部分 ——
  * 点击按钮就等于「把这个系统打开，登录一次，我在这儿等」。
  *
@@ -131,22 +131,22 @@ routers.push(
       }
     }
 
-    // 1) 先把入口拉起来：H5 开内嵌窗口，小程序唤起微信
-    let launch = null
-    if (params.launch !== false && typeof ctx.openEntry === 'function') {
-      try {
-        launch = ctx.openEntry(rule)
-      } catch (e) {
-        launch = { ok: false, message: `打开入口失败：${e.message}` }
-      }
-    }
-
-    // 2) 代理必须在跑，否则流量根本不经过我们
+    // 1) 代理必须先起来：页面一打开就会发请求，代理晚一步这段流量就永久漏了
     if (!ctx.proxyRunning) {
       try {
         await ctx.startProxy()
       } catch (e) {
-        return { ok: false, message: `抓包代理启动失败：${e.message}`, launch }
+        return { ok: false, message: `抓包代理启动失败：${e.message}`, launch: null }
+      }
+    }
+
+    // 2) 再打开入口：有 H5 地址就开内嵌窗口，纯小程序才唤起微信
+    let launch = null
+    if (params.launch !== false && typeof ctx.openEntry === 'function') {
+      try {
+        launch = ctx.openEntry(rule, params.cinema || {})
+      } catch (e) {
+        launch = { ok: false, message: `打开入口失败：${e.message}` }
       }
     }
 

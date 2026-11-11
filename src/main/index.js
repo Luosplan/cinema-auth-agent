@@ -186,22 +186,27 @@ function updateTrayMenu() {
  * 采集端就是个哑巴 —— 所以点「获取参数」时先把入口拉起来，
  * 操作员只需要在打开的页面里登录一次，参数会自动陆续抓齐。
  *
- * H5：用内嵌窗口打开，走独立 persist 分区（下次再点还保留登录态），
- *     请求由 Electron 网络栈发出，自动走系统代理，因此能被 MITM 解出来。
- * 小程序：桌面端只能通过 weixin:// scheme 唤起微信，能不能直达取决于
- *     微信版本和小程序是否开通了 scheme 能力，失败时降级为文字指引。
+ * 打开顺序（能开的先开）：
+ *   1. 出票程序自己的 H5 地址（后台 CinemaGroup.accessUrl）—— 最可靠，走内嵌窗口，
+ *      请求由 Electron 网络栈发出，自动经过系统代理，所以能被 MITM 解出来。
+ *   2. 规则里配的 H5 地址（有些系统所有影城共用一个入口）。
+ *   3. 纯小程序：只能唤起微信。`weixin://dl/business/?appid=` 只能把微信拉到前台，
+ *      不能直达某个页面，微信侧通常回「当前页面无法访问」—— 这条只是尽力而为的兜底。
  */
-function openEntry(rule) {
-  const launch = rule?.launch
-  if (!launch) {
-    return { ok: false, message: '这套系统还没配置入口地址，请在微信里手动打开对应小程序' }
-  }
+function openEntry(rule, cinema = {}) {
+  const accessUrl = String(cinema.accessUrl || '').trim()
+  const accessType = String(cinema.accessType || '').toLowerCase()
+  const ruleUrl = String(rule?.launch?.url || '').trim()
+  const url = accessUrl || ruleUrl
 
-  if (launch.type === 'h5' && launch.url) {
+  // 有 H5 地址就开窗，不管 accessType 写的是什么：能进页面才有流量
+  if (url) {
+    const userAgent = rule?.launch?.userAgent || MOBILE_UA
     if (paramFlowWindow && !paramFlowWindow.isDestroyed()) {
+      paramFlowWindow.setTitle(`${cinema.name || rule?.name || ''} · 获取参数`)
       paramFlowWindow.focus()
-      paramFlowWindow.loadURL(launch.url, { userAgent: launch.userAgent || MOBILE_UA })
-      return { ok: true, mode: 'h5' }
+      paramFlowWindow.loadURL(url, { userAgent })
+      return { ok: true, mode: 'h5', url, hint: `已打开 ${cinema.name || rule?.name || ''} 的 H5 页面，在里面登录一次即可` }
     }
 
     paramFlowWindow = new BrowserWindow({
@@ -209,7 +214,7 @@ function openEntry(rule) {
       height: 780,
       minWidth: 360,
       minHeight: 560,
-      title: `${launch.name || rule.name} · 获取参数`,
+      title: `${cinema.name || rule?.name || ''} · 获取参数`,
       autoHideMenuBar: true,
       webPreferences: {
         partition: 'persist:param-flow',
@@ -221,25 +226,36 @@ function openEntry(rule) {
     paramFlowWindow.on('closed', () => {
       paramFlowWindow = null
     })
-    paramFlowWindow.loadURL(launch.url, { userAgent: launch.userAgent || MOBILE_UA })
-    return { ok: true, mode: 'h5' }
+    // 打不开要能说清是域名挂了还是证书/网络问题，否则用户只看到白屏
+    paramFlowWindow.webContents.on('did-fail-load', (_e, code, desc, failedUrl) => {
+      ctx.lastEntryError = `页面加载失败（${code} ${desc}）：${failedUrl}`
+      log('error', 'param-entry', ctx.lastEntryError)
+    })
+    paramFlowWindow.loadURL(url, { userAgent })
+    return {
+      ok: true,
+      mode: 'h5',
+      url,
+      hint: `已打开 ${cinema.name || rule?.name || ''} 的 H5 页面，在里面登录一次即可`
+    }
   }
 
-  if (launch.type === 'miniapp') {
-    const scheme = launch.scheme || (launch.appid ? `weixin://dl/business/?appid=${launch.appid}` : '')
-    const name = launch.name || rule.name
+  if (accessType === 'miniapp' || rule?.launch?.type === 'miniapp') {
+    const appid = rule?.launch?.appid || ''
+    const name = rule?.launch?.name || rule?.name || cinema.name || '该小程序'
+    const scheme = rule?.launch?.scheme || (appid ? `weixin://dl/business/?appid=${appid}` : '')
     if (scheme) {
       shell.openExternal(scheme).catch(() => {})
       return {
         ok: true,
         mode: 'miniapp',
-        hint: `已尝试唤起微信《${name}》，若没反应请在微信里手动打开该小程序并登录`
+        hint: `小程序没法用链接直达。已尝试唤起微信《${name}》；若停在「当前页面无法访问」，请在电脑版微信里手动打开该小程序并登录，流量同样会经过本机代理`
       }
     }
-    return { ok: false, message: `请在微信里打开小程序《${name}》并登录` }
+    return { ok: false, message: `这套系统只有小程序入口，请在微信里打开《${name}》并登录` }
   }
 
-  return { ok: false, message: '这套系统的打开方式暂不支持' }
+  return { ok: false, message: '这套系统没有配置 H5 入口，也拿不到小程序 appid' }
 }
 
 async function startProxy() {

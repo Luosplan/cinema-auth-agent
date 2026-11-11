@@ -226,6 +226,18 @@ const dialogParamRows = computed(() => {
   return Object.keys(cfg).map((key) => ({ key, label: key, required: null }))
 })
 
+/** 入口说明：H5 地址来自影城自己的 accessUrl，没配的话只能靠微信打开小程序 */
+const dialogEntry = computed(() => {
+  const cinema = dialogCinema.value
+  if (!cinema) return { text: '', ok: false }
+  const url = String(cinema.accessUrl || '').trim()
+  if (url) return { text: url, ok: true }
+  if (String(cinema.accessType || '').toLowerCase() === 'miniapp') {
+    return { text: '仅小程序入口，需在微信里打开', ok: false }
+  }
+  return { text: '后台没有配置 H5 入口地址', ok: false }
+})
+
 /** 抓包拿到的值，key → value；打开弹窗时清空，点「获取参数」才填 */
 const paramValues = ref({})
 /** key → 取值来源，标在值后面：同名字段可能来自 cookie、请求头或某个响应体，看不出处没法排错 */
@@ -258,6 +270,12 @@ async function captureParams() {
     const res = await invoke('cinemas:capture-params', {
       keys,
       systemCode: cinema.systemCode || '',
+      // 入口地址在影城自己身上（CinemaGroup.accessUrl），不是所有影城共用一个
+      cinema: {
+        name: cinema.name,
+        accessUrl: cinema.accessUrl || '',
+        accessType: cinema.accessType || ''
+      },
       waitMs: 25000
     })
     if (!res?.ok) {
@@ -483,6 +501,12 @@ onMounted(async () => {
       align-center
     >
       <div v-if="dialogCinema" class="dlg">
+        <div class="p-entry">
+          <span class="p-entry-k">入口</span>
+          <span class="p-entry-v mono" :class="{ dim: !dialogEntry.ok }" :title="dialogEntry.text">
+            {{ dialogEntry.text }}
+          </span>
+        </div>
         <div v-if="dialogParamRows.length" class="param-wrap">
           <table class="param-table">
             <thead>
@@ -923,6 +947,27 @@ tbody tr:hover td {
 
 /* 采集参数表：沿用主表的网格线，列宽跟着内容走，
    单个值给个上限，太长的 token 类内容截断，靠 title 看全文 */
+/* 入口一行：告诉操作员点下去会打开什么，抓不到时也能立刻看出是「没入口」还是「抓不到值」 */
+.p-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 11.5px;
+}
+
+.p-entry-k {
+  flex: none;
+  color: var(--tx-4);
+}
+
+.p-entry-v {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--tx-2);
+}
+
 .param-wrap {
   max-height: 300px;
   overflow: auto;
