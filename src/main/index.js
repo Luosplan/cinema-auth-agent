@@ -27,6 +27,15 @@ let quitting = false
 let shutdownPending = false
 let shutdownDone = false
 let captureFlushTimer = null
+let paramFlowWindow = null
+
+/**
+ * H5 入口用手机 UA 打开：这些页面大多只在微信里被访问过，
+ * 用桌面 UA 会拿到「请在微信中打开」的拦截页。
+ */
+const MOBILE_UA =
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 ' +
+  '(KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.44(0x18002c2f) NetType/WIFI Language/zh_CN'
 
 const ctx = {
   config: null,
@@ -168,6 +177,69 @@ function updateTrayMenu() {
     }
   ])
   tray.setContextMenu(menu)
+}
+
+/**
+ * 「获取参数」的打开动作。
+ *
+ * 为什么要自动打开：参数只能从真实流量里来。页面不开、小程序不登录，
+ * 采集端就是个哑巴 —— 所以点「获取参数」时先把入口拉起来，
+ * 操作员只需要在打开的页面里登录一次，参数会自动陆续抓齐。
+ *
+ * H5：用内嵌窗口打开，走独立 persist 分区（下次再点还保留登录态），
+ *     请求由 Electron 网络栈发出，自动走系统代理，因此能被 MITM 解出来。
+ * 小程序：桌面端只能通过 weixin:// scheme 唤起微信，能不能直达取决于
+ *     微信版本和小程序是否开通了 scheme 能力，失败时降级为文字指引。
+ */
+function openEntry(rule) {
+  const launch = rule?.launch
+  if (!launch) {
+    return { ok: false, message: '这套系统还没配置入口地址，请在微信里手动打开对应小程序' }
+  }
+
+  if (launch.type === 'h5' && launch.url) {
+    if (paramFlowWindow && !paramFlowWindow.isDestroyed()) {
+      paramFlowWindow.focus()
+      paramFlowWindow.loadURL(launch.url, { userAgent: launch.userAgent || MOBILE_UA })
+      return { ok: true, mode: 'h5' }
+    }
+
+    paramFlowWindow = new BrowserWindow({
+      width: 430,
+      height: 780,
+      minWidth: 360,
+      minHeight: 560,
+      title: `${launch.name || rule.name} · 获取参数`,
+      autoHideMenuBar: true,
+      webPreferences: {
+        partition: 'persist:param-flow',
+        contextIsolation: true,
+        nodeIntegration: false
+      }
+    })
+    paramFlowWindow.setMenu(null)
+    paramFlowWindow.on('closed', () => {
+      paramFlowWindow = null
+    })
+    paramFlowWindow.loadURL(launch.url, { userAgent: launch.userAgent || MOBILE_UA })
+    return { ok: true, mode: 'h5' }
+  }
+
+  if (launch.type === 'miniapp') {
+    const scheme = launch.scheme || (launch.appid ? `weixin://dl/business/?appid=${launch.appid}` : '')
+    const name = launch.name || rule.name
+    if (scheme) {
+      shell.openExternal(scheme).catch(() => {})
+      return {
+        ok: true,
+        mode: 'miniapp',
+        hint: `已尝试唤起微信《${name}》，若没反应请在微信里手动打开该小程序并登录`
+      }
+    }
+    return { ok: false, message: `请在微信里打开小程序《${name}》并登录` }
+  }
+
+  return { ok: false, message: '这套系统的打开方式暂不支持' }
 }
 
 async function startProxy() {
@@ -392,6 +464,7 @@ app.whenReady().then(async () => {
   // 挂到 ctx 上，供渲染层的 IPC 路由调用
   ctx.startProxy = startProxy
   ctx.stopProxy = stopProxy
+  ctx.openEntry = openEntry
   ctx.updateTrayMenu = updateTrayMenu
   ctx.recoverStaleProxy = recoverStaleProxy
 

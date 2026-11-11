@@ -4,6 +4,7 @@ import { promisify } from 'node:util'
 import { join } from 'node:path'
 import fs from 'node:fs'
 import { mergeRules } from '../collectors/rules/index.js'
+import { paramDef, resolveForKeys, normalizeKey } from '../collectors/ParamResolver.js'
 import { pickValues } from '../collectors/ParamCollector.js'
 
 const exec = promisify(execFile)
@@ -99,9 +100,16 @@ routers.push(
 )
 
 /**
- * 参数弹窗的「获取参数」：按该影城的抓包字段清单去抓包记录里捞值。
- * 先把已有记录扫一遍（用户可能刚登录过），没凑齐就等新流量进来，直到超时。
- * 需要该系统有抓包规则 —— 没有规则意味着代理连流量都不解密，抓不到东西。
+ * 参数弹窗的「获取参数」。
+ *
+ * 一条完整链路是：打开入口 → 代理在跑 → 等操作员登录 → 从流量里捞值。
+ * 参数只能来自真实流量，所以「打开」不是可选步骤而是一部分 ——
+ * 点击按钮就等于「把这个系统打开，登录一次，我在这儿等」。
+ *
+ * 取值分两层：
+ *   精确层 resolveForKeys —— 规则里写明的路径/别名，能绕开占位值；
+ *   通用层 pickValues     —— 按字段名把 cookie/头/JSON 翻一遍，兜住没写规则的字段。
+ * 同一字段两层都有时精确层优先；有新流量时以最新一条为准（token 会刷新）。
  */
 routers.push(
   new EventRoute('cinemas:capture-params', 'invoke', async (api, data) => {
@@ -123,15 +131,43 @@ routers.push(
       }
     }
 
+    // 1) 先把入口拉起来：H5 开内嵌窗口，小程序唤起微信
+    let launch = null
+    if (params.launch !== false && typeof ctx.openEntry === 'function') {
+      try {
+        launch = ctx.openEntry(rule)
+      } catch (e) {
+        launch = { ok: false, message: `打开入口失败：${e.message}` }
+      }
+    }
+
+    // 2) 代理必须在跑，否则流量根本不经过我们
     if (!ctx.proxyRunning) {
       try {
         await ctx.startProxy()
       } catch (e) {
-        return { ok: false, message: `抓包代理启动失败：${e.message}` }
+        return { ok: false, message: `抓包代理启动失败：${e.message}`, launch }
       }
     }
 
     const values = {}
+    // key → 取值来源（响应体 data.baseTypeRes / 请求头 / 按名匹配…），弹窗里标在值后面
+    const from = {}
+    // 0 未知 / 1 按名匹配 / 2 规则精确命中
+    const rank = {}
+
+    const put = (key, value, desc, level) => {
+      if (!value) return
+      if ((rank[key] || 0) > level) return
+      values[key] = value
+      from[key] = desc
+      rank[key] = level
+    }
+
+    // 声明了 deny 的字段只认精确层：奥斯卡公共请求体里有个 k="123" 的占位值，
+    // 按名匹配会稳定抓到它，抓到假值比抓不到更糟
+    const strict = new Set(keys.filter((key) => (paramDef(rule, key).deny || []).length))
+
     // 只回扫最近 200 条：更早的基本是别的系统，翻全量没意义还慢
     let scanned = Math.max(0, ctx.captures.length - 200)
     const scanNew = () => {
@@ -139,17 +175,36 @@ routers.push(
       if (list.length < scanned) scanned = 0 // 缓冲被截断过，从头再扫
       for (let i = scanned; i < list.length; i += 1) {
         const record = list[i]
-        if (ctx.extractor.hostMatches(rule, record.host)) {
-          Object.assign(values, pickValues(record, keys))
+        if (!ctx.extractor.hostMatches(rule, record.host)) continue
+
+        for (const [key, hit] of Object.entries(resolveForKeys(rule, record, keys))) {
+          put(key, hit.value, hit.from, 2)
+        }
+
+        const rest = keys.filter((key) => !strict.has(key) && (rank[key] || 0) < 2)
+        if (rest.length) {
+          for (const [key, value] of Object.entries(pickValues(record, rest))) {
+            put(key, value, '按字段名匹配', 1)
+          }
         }
       }
       scanned = list.length
     }
 
     scanNew()
+
+    // 后台字段清单里常混着「会员成本」「备注」这种根本不在流量里的字段，
+    // 以它们为准会让弹窗每次都干等满超时 —— 等待只盯规则声明过的可抓字段
+    const declared = new Set(
+      (rule.params || []).map((item) =>
+        normalizeKey(typeof item === 'string' ? item : item?.key || '')
+      )
+    )
+    const blocking = declared.size ? keys.filter((key) => declared.has(normalizeKey(key))) : keys
+
     const waitMs = Math.min(Math.max(Number(params.waitMs) || 20000, 3000), 60000)
     const deadline = Date.now() + waitMs
-    while (keys.some((key) => !values[key]) && Date.now() < deadline) {
+    while (blocking.some((key) => !values[key]) && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 700))
       scanNew()
     }
@@ -157,7 +212,9 @@ routers.push(
     return {
       ok: true,
       values,
+      from,
       missing: keys.filter((key) => !values[key]),
+      launch,
       proxyRunning: ctx.proxyRunning
     }
   })

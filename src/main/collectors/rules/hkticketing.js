@@ -15,6 +15,9 @@ export default {
   enabled: true,
   // TODO: 待填，例如 ['api.hkticketing.com', '*.hkticketing.com']
   hosts: [],
+
+  // hosts 填好之后，「获取参数」就能用了
+  params: ['mobile', 'authorization', 'token'],
   capture: {
     fromResponse: [
       {

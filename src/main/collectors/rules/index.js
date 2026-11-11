@@ -1,6 +1,7 @@
 import gyyse from './gyyse'
 import yipiaotong from './yipiaotong'
 import whale from './whale'
+import starOpen from './star-open'
 
 /**
  * 一票通定制分支。
@@ -9,7 +10,7 @@ import whale from './whale'
  * 规则文件留在仓库里不影响打包。HK 票务同理，需要时加回来就行，
  * 都不用从别的分支拷代码。
  */
-export const defaultRules = [yipiaotong, gyyse, whale]
+export const defaultRules = [starOpen, yipiaotong, gyyse, whale]
 
 /**
  * 把用户配置里的覆盖项合并到默认规则上。

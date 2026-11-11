@@ -18,6 +18,9 @@ export default {
   enabled: true,
   // TODO: 待填，例如 ['app.yipiaotong.com', '*.yipiaotong.com']
   hosts: [],
+
+  // hosts 填好之后，「获取参数」就能用了
+  params: ['mobile', 'authorization', 'token'],
   capture: {
     fromResponse: [
       {

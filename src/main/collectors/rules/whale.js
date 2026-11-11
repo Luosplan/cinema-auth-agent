@@ -22,6 +22,15 @@ export default {
   name: '鲸鱼系统',
   enabled: true,
   hosts: ['cygg.jingyumovie.cn', '*.jingyumovie.cn'],
+
+  launch: {
+    type: 'miniapp',
+    name: '鲸鱼影城',
+    appid: 'wx9a6601603b142690'
+  },
+
+  // 服务端要的是 accessToken + refreshToken，顺带把手机号取回来
+  params: ['mobile', 'authorization', 'refreshtoken'],
   capture: {
     fromResponse: [
       {

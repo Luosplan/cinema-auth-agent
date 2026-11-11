@@ -178,6 +178,8 @@ async function openParam(cinema) {
   dialogCinema.value = cinema
   // 每次打开都是「这次抓到的」，不要把上一家的值带过来
   paramValues.value = {}
+  paramFrom.value = {}
+  paramHint.value = ''
   paramDialog.value = true
 }
 
@@ -226,7 +228,20 @@ const dialogParamRows = computed(() => {
 
 /** 抓包拿到的值，key → value；打开弹窗时清空，点「获取参数」才填 */
 const paramValues = ref({})
+/** key → 取值来源，标在值后面：同名字段可能来自 cookie、请求头或某个响应体，看不出处没法排错 */
+const paramFrom = ref({})
+/** 打开入口的结果提示（唤起微信 / 已开 H5 窗口 / 没有入口） */
+const paramHint = ref('')
 const capturing = ref(false)
+
+/** 把 openEntry 的返回翻译成一句人话，区分「打开了」和「打不开」 */
+function launchHintOf(launch) {
+  if (!launch) return ''
+  if (!launch.ok) return launch.message || ''
+  if (launch.hint) return launch.hint
+  if (launch.mode === 'h5') return '已打开登录窗口，在窗口里完成登录即可，参数会自动回填'
+  return ''
+}
 
 async function captureParams() {
   const cinema = dialogCinema.value
@@ -238,6 +253,7 @@ async function captureParams() {
   }
 
   capturing.value = true
+  paramHint.value = ''
   try {
     const res = await invoke('cinemas:capture-params', {
       keys,
@@ -248,11 +264,13 @@ async function captureParams() {
       ElMessage.error(res?.message || '获取失败')
       return
     }
+    paramHint.value = launchHintOf(res.launch)
     const values = res.values || {}
     paramValues.value = { ...paramValues.value, ...values }
+    paramFrom.value = { ...paramFrom.value, ...(res.from || {}) }
     const got = Object.keys(values).length
     if (!got) {
-      ElMessage.warning('这次没有抓到数据，请在「抓包日志」里确认有该系统的请求')
+      ElMessage.warning('这次没有抓到数据，请先打开该系统完成一次登录')
     } else if (res.missing?.length) {
       ElMessage.warning(`已获取 ${got} 个参数，${res.missing.length} 个还没抓到`)
     } else {
@@ -479,7 +497,10 @@ onMounted(async () => {
               <tr v-for="row in dialogParamRows" :key="row.key">
                 <td :title="row.label">{{ row.label }}</td>
                 <td class="mono p-val" :title="paramValues[row.key] || ''">
-                  <span v-if="paramValues[row.key]">{{ paramValues[row.key] }}</span>
+                  <template v-if="paramValues[row.key]">
+                    <span class="p-text">{{ paramValues[row.key] }}</span>
+                    <span v-if="paramFrom[row.key]" class="p-src">{{ paramFrom[row.key] }}</span>
+                  </template>
                   <span v-else class="dim">—</span>
                 </td>
                 <td class="p-required">
@@ -495,8 +516,8 @@ onMounted(async () => {
           </table>
         </div>
         <div v-else class="empty-cell">该影城没有额外的采集参数</div>
-        <div v-if="capturing" class="p-hint">
-          正在抓包，请在该系统的 H5 / 小程序里登录一次，抓到值会自动回填…
+        <div v-if="capturing || paramHint" class="p-hint">
+          {{ capturing ? paramHint || '正在打开该系统，请在里面登录一次，抓到的值会自动回填…' : paramHint }}
         </div>
       </div>
 
@@ -936,6 +957,27 @@ tbody tr:hover td {
 
 .p-val {
   color: var(--tx);
+}
+
+/* 值 + 来源并排：来源要弱到不抢值，但扫一眼就知道这个值是哪儿来的 */
+.p-val .p-text {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.p-val .p-src {
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--bg-panel);
+  font-family: inherit;
+  font-size: 10px;
+  color: var(--tx-4);
+  vertical-align: bottom;
 }
 
 /* 必填的「是」给正文色，否 / 未标注压淡——一眼能看出哪些字段不能漏 */

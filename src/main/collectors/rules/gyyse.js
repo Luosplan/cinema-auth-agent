@@ -12,6 +12,14 @@ export default {
   name: '象塑光影',
   enabled: true,
   hosts: ['app.app.gyyse.com', '*.gyyse.com'],
+
+  launch: {
+    type: 'h5',
+    name: '象塑光影',
+    url: 'https://app.app.gyyse.com/'
+  },
+
+  params: ['mobile', 'token'],
   capture: {
     fromResponse: [
       {
