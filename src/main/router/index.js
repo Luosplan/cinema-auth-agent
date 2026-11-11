@@ -75,35 +75,6 @@ routers.push(
   })
 )
 
-/**
- * 保存某家影城的入口 —— 直接调后台现成的「编辑出票程序」接口。
- *
- * 入口链接（accessUrl / accessAppId）本来就是这个出票程序自己的字段，
- * 后台 `PUT /admin/cinema/cinemaGroups/:id` 早就在维护它们，会员端不需要再开一条写接口。
- * 这里只带这两项，accessType / protocol / ticketParams 一个都不传 ——
- * 那些是出票程序的身份，采集端无权也不该改。
- */
-routers.push(
-  new EventRoute('cinemas:entry:set', 'invoke', async (api, data) => {
-    const params = data.params || {}
-    const cinemaGroupId = Number(params.cinemaGroupId || 0)
-    if (!cinemaGroupId) return { ok: false, message: '缺少影城 ID' }
-
-    try {
-      const row = await api.ctx.auth.put(`/admin/cinema/cinemaGroups/${cinemaGroupId}`, {
-        accessUrl: params.url || null,
-        accessAppId: params.appid || null
-      })
-      return {
-        ok: true,
-        entry: { url: row.accessUrl || '', appid: row.accessAppId || '' }
-      }
-    } catch (e) {
-      return { ok: false, message: e.message, status: e.status || 0 }
-    }
-  })
-)
-
 /** 「访问」：按覆盖 → 影城 accessUrl → 规则入口 的顺序打开，不做抓包等待 */
 routers.push(
   new EventRoute('cinemas:entry:open', 'invoke', async (api, data) => {

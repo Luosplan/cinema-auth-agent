@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { ElMessage } from 'element-plus'
 import { invoke, on } from '@utils/ipc'
 import { auth, loadAuth } from '../stores/auth'
-import { activeSystemId, ensureSystem, selectSystem, consumePendingParam } from '../stores/activeSystem'
+import { activeSystemId, ensureSystem, selectSystem } from '../stores/activeSystem'
 import LoginDialog from '../components/LoginDialog.vue'
 import CopyIcon from '../components/CopyIcon.vue'
 
@@ -127,6 +127,15 @@ async function copyAccountId(acc) {
   }
   const ok = await writeClipboard(accountId)
   if (ok) ElMessage.success(`复制 ${accountId} 成功`)
+  else ElMessage.warning('剪贴板不可用，请检查系统权限')
+}
+
+/** 详情弹窗里复制入口链接 */
+async function copyEntryUrl(cinema) {
+  const url = String(cinema?.accessUrl || '').trim()
+  if (!url) return
+  const ok = await writeClipboard(url)
+  if (ok) ElMessage.success('已复制入口链接')
   else ElMessage.warning('剪贴板不可用，请检查系统权限')
 }
 
@@ -603,19 +612,6 @@ onMounted(async () => {
   await loadAuth()
   if (auth.loggedIn) await reload()
 
-  // 影城配置页点「账号」跳过来的：树拉完了才找得到这家影城，选中它所在的系统并打开参数弹窗
-  const pending = consumePendingParam()
-  if (auth.loggedIn && pending?.id) {
-    const sys = tree.value.find((s) => (s.children || []).some((c) => c.id === pending.id))
-    const target = sys?.children?.find((c) => c.id === pending.id)
-    if (sys && target) {
-      selectSystem(sys.id)
-      // 弹窗里要显示已有账号，先把这家的账号拉回来
-      await loadAccounts([target])
-      openParam(target)
-    }
-  }
-
   offParamUpdate = on('param-capture:update', (payload) => {
     // 弹窗没开或已经停了就不往界面上糊数据
     if (!paramDialog.value || !capturing.value) return
@@ -930,6 +926,30 @@ onUnmounted(() => {
       <div v-if="dialogCinema" class="dlg">
         <div class="dlg-row"><span class="k">影城</span><span class="v">{{ dialogCinema.name }}</span></div>
         <div class="dlg-row"><span class="k">编码</span><span class="v mono">{{ dialogCinema.code || '—' }}</span></div>
+        <div class="dlg-row"><span class="k">类型</span><span class="v">{{ typeText(dialogCinema) }}</span></div>
+        <div class="dlg-row">
+          <span class="k">入口链接</span>
+          <span class="v mono dlg-link">
+            <span v-if="dialogCinema.accessUrl" class="dlg-link-text" :title="dialogCinema.accessUrl">
+              {{ dialogCinema.accessUrl }}
+            </span>
+            <span v-else class="dim">未设置</span>
+            <button
+              v-if="dialogCinema.accessUrl"
+              class="copy-btn"
+              type="button"
+              title="复制入口链接"
+              aria-label="复制入口链接"
+              @click="copyEntryUrl(dialogCinema)"
+            >
+              <CopyIcon />
+            </button>
+          </span>
+        </div>
+        <div class="dlg-row">
+          <span class="k">appId</span>
+          <span class="v mono">{{ dialogCinema.accessAppId || '—' }}</span>
+        </div>
 
         <div class="dlg-block">
           <div class="k">出票账号</div>
@@ -1382,6 +1402,20 @@ tbody tr:hover td {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 详情里的入口链接：长链接省略号，复制按钮不被挤掉 */
+.dlg-link {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dlg-link-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dlg-block {

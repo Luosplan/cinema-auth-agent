@@ -16,12 +16,6 @@ const routes = [
     meta: { title: '影城账号' }
   },
   {
-    path: '/systems',
-    name: 'Systems',
-    component: () => import('@views/systems.vue'),
-    meta: { title: '影城配置' }
-  },
-  {
     path: '/logs',
     name: 'Logs',
     component: () => import('@views/logs.vue'),

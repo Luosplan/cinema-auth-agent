@@ -196,9 +196,9 @@ onUnmounted(() => {
         </div>
 
         <div v-if="!sortedCredentials.length" class="empty-box">
-          还没有采集到凭证。先确认
-          <router-link class="link" to="/systems">影城配置</router-link>
-          里的域名，再在微信里正常打开一次该影城的小程序。
+          还没有采集到凭证。到
+          <router-link class="link" to="/cinemas">影城账号</router-link>
+          打开参数弹窗，在微信里正常打开一次该影城的小程序。
         </div>
 
         <div v-else class="cred-list">
