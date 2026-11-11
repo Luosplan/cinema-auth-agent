@@ -984,6 +984,8 @@ app.whenReady().then(async () => {
   ctx.startProxy = startProxy
   ctx.stopProxy = stopProxy
   ctx.openEntry = openEntry
+  /** 采集收尾时的诊断要往界面日志里写一行（例如「缺 token，本轮凭证类字段名是这些」） */
+  ctx.log = log
   /**
    * 小程序唯一的启动方式：weixin://launchapplet/?app_id=（微信「添加到桌面」用的那条链接）。
    * 直开的前提是该小程序被「添加到电脑桌面」过一次，细节见 wx/WxUi.js 的注释。

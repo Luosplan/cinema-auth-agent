@@ -766,6 +766,7 @@ onUnmounted(() => {
       v-model="paramDialog"
       :title="dialogCinema ? `影城参数 · ${dialogCinema.name}` : '影城参数'"
       :width="paramMode === 'miniapp' ? '620px' : '980px'"
+      :close-on-click-modal="false"
       align-center
       class="param-dialog"
     >

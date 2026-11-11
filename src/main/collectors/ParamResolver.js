@@ -14,6 +14,8 @@
  * 猜不到就把字段留给通用匹配或留给操作员手动补。
  */
 
+import { parseBody } from './body.js'
+
 /** 递归查找的最大深度：真实接口很少超过 5 层，再深基本是列表项，容易误抓 */
 const MAX_DEPTH = 5
 
@@ -38,7 +40,30 @@ export const FIELD_ALIASES = {
   openid: ['openid', 'open_id', 'wxopenid', 'wx_openid', 'thirdopenid', 'useropenid'],
   unionid: ['unionid', 'union_id', 'wxunionid'],
   authorization: ['accesstoken', 'access_token', 'authtoken'],
-  token: ['token', 'accesstoken', 'access_token', 'thirdsession', 'sessionid'],
+  /**
+   * token 的别名要放宽 —— 后台统一叫 token，各家接口的叫法却完全不同：
+   * 有的直接回 authorization 头，有的叫 applet-token（wx 小程序系）、
+   * 有的叫 userToken / loginToken / jwt。只写 'token' 会让这类系统永远抓空。
+   */
+  token: [
+    'token',
+    'accesstoken',
+    'access_token',
+    'authtoken',
+    'applettoken',
+    'applet_token',
+    'applet-token',
+    'apptoken',
+    'app_token',
+    'usertoken',
+    'user_token',
+    'logintoken',
+    'login_token',
+    'jwt',
+    'thirdsession',
+    'sessionid',
+    'authorization'
+  ],
   refreshtoken: ['refreshtoken', 'refresh_token'],
   k: ['k'],
   tenantid: ['tenantid', 'tenant_id'],
@@ -56,6 +81,17 @@ export const FIELD_ALIASES = {
 /** 鉴权类字段优先从请求头取，别在 JSON 里乱翻 */
 const HEADER_FIRST = {
   authorization: ['authorization', 'x-access-token', 'x-token', 'accesstoken'],
+  // 后台要的是 token、但接口放在 Authorization 头里，是最常见的一种错位
+  token: [
+    'authorization',
+    'authorization-token',
+    'x-access-token',
+    'x-token',
+    'x-auth-token',
+    'applet-token',
+    'access-token',
+    'token'
+  ],
   tenantid: ['tenant-id', 'tenantid']
 }
 
@@ -126,16 +162,8 @@ function pickHeader(headers, names) {
   return null
 }
 
-function safeJson(text) {
-  if (!text || typeof text !== 'string') return null
-  const trimmed = text.trim()
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null
-  try {
-    return JSON.parse(trimmed)
-  } catch {
-    return null
-  }
-}
+/** 鉴权类的值可能带 `Bearer ` 前缀，存进库前必须剥掉，否则上报的是一段废值 */
+const AUTH_KEYS = new Set(['token', 'authorization', 'refreshtoken'])
 
 /**
  * 规则里对该字段的显式声明（可选）。
@@ -202,8 +230,10 @@ export function resolveForKeys(rule, record, keys) {
   if (!record || !Array.isArray(keys) || !keys.length) return {}
 
   const headers = record.reqHeaders || {}
-  const reqJson = safeJson(record.reqBody)
-  const resJson = safeJson(record.resBody)
+  // body 可能是 JSON，也可能是 x-www-form-urlencoded：mini 系登录接口就是表单，
+  // 只认 JSON 的话它的 token/agent 全部落在解析层之外
+  const reqJson = parseBody(record.reqBody)
+  const resJson = parseBody(record.resBody)
 
   const out = {}
 
@@ -218,7 +248,13 @@ export function resolveForKeys(rule, record, keys) {
 
     const useIt = (value, from) => {
       if (!isUsableValue(value)) return false
-      const text = String(value).trim()
+      let text = String(value).trim()
+      if (AUTH_KEYS.has(key)) {
+        text = text.replace(/^bearer\s+/i, '').trim()
+        // 太短的一定不是凭证：接口里 token 常被置成占位符（"-"、"null"、"0"）
+        if (text.length < 8) return false
+      }
+      if (!text) return false
       if (deny.has(text.toLowerCase())) return false
       hit = { value: text, from }
       return true

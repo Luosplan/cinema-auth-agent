@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import fs from 'node:fs'
 import { mergeRules } from '../collectors/rules/index.js'
 import { paramDef, resolveForKeys, normalizeKey, describeParams } from '../collectors/ParamResolver.js'
-import { pickValues } from '../collectors/ParamCollector.js'
+import { pickValues, listFieldNames } from '../collectors/ParamCollector.js'
 import { isBypassHost } from '../mitm/hostBypass.js'
 import { parseAppid, appletUrl } from '../wx/WxUi'
 
@@ -678,6 +678,32 @@ routers.push(
     // 只收回「自己这一轮」的开关 —— 被新一次「获取参数」顶掉时（superseded），
     // 收工的这一轮不能把下一轮刚打开的全量解密关掉，否则新轮白跑。
     if (isMiniapp && seq === paramCaptureSeq) ctx.extractor.setOpenCapture(false)
+
+    /**
+     * 收工时还缺字段：把这一轮「像凭证的字段名」写进日志。
+     *
+     * 只打名字、绝不打值 —— 名字是排查线索，值是客户的登录凭证，不能进日志。
+     * 这一步是为了不再靠猜：token 抓不到时，日志会直接列出接口原本把它叫什么
+     * （applet-token / userToken / jwt / sessionkey …），照着补一条别名就行。
+     */
+    const stillMissing = keys.filter((key) => !values[key])
+    if (stillMissing.length && typeof ctx.log === 'function') {
+      const AUTH_HINT = /token|auth|session|jwt|ticket|secret|apikey/i
+      const seen = new Set()
+      // 全量解密时缓冲里能有一千多条，只需要最近的一批来试名字
+      for (const record of ctx.captures.slice(-400)) {
+        if (!inScope(record.host)) continue
+        for (const name of listFieldNames(record)) {
+          if (AUTH_HINT.test(name)) seen.add(name)
+        }
+      }
+      const list = [...seen].slice(0, 12)
+      ctx.log(
+        'info',
+        `缺少 ${stillMissing.join('、')}；本轮凭证类字段名：` +
+          (list.length ? list.join(' / ') : '（一条都没有，说明这类接口根本没被解密）')
+      )
+    }
 
     /**
      * 这一轮实际解开了哪些域名。

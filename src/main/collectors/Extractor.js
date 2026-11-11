@@ -9,6 +9,10 @@
  */
 
 import { isBypassHost } from '../mitm/hostBypass.js'
+import { parseBody } from './body.js'
+
+/** 兼容旧引用：body 解析统一收到 collectors/body.js 里 */
+export { parseJsonSafe } from './body.js'
 
 /**
  * @typedef {Object} CaptureRule
@@ -116,7 +120,8 @@ export default class Extractor {
     const defs = rule.capture?.fromResponse || []
     if (!defs.length || !record.resBody) return null
 
-    const body = parseJsonSafe(record.resBody)
+    // JSON 与表单都认：一部分系统的登录响应就是 `code=0&token=xxx` 这种表单
+    const body = parseBody(record.resBody)
     if (!body) return null
 
     const method = String(record.method || '').toUpperCase()
@@ -257,13 +262,3 @@ export function pickExtra(body, extraPaths = {}) {
   return out
 }
 
-export function parseJsonSafe(text) {
-  if (!text) return null
-  const trimmed = text.trim()
-  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null
-  try {
-    return JSON.parse(trimmed)
-  } catch {
-    return null
-  }
-}
