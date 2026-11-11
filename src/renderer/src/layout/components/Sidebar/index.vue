@@ -22,7 +22,7 @@ const menus = [
   },
   {
     path: '/systems',
-    label: '系统配置',
+    label: '影城配置',
     icon: 'M12 3 3 7.6l9 4.6 9-4.6L12 3M3 12.4l9 4.6 9-4.6M3 16.9l9 4.6 9-4.6'
   },
   { path: '/logs', label: '抓包日志', icon: 'M4 6h6M4 12h10M4 18h7M16 15l3 3-3 3' },

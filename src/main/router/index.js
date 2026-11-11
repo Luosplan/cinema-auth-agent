@@ -309,7 +309,9 @@ routers.push(
       name: r.name,
       hosts: r.hosts || [],
       enabled: r.enabled !== false,
-      expiry: r.expiry
+      expiry: r.expiry,
+      // 入口可以在「影城配置」里改，界面需要看到当前值
+      launch: r.launch || null
     }))
   })
 )

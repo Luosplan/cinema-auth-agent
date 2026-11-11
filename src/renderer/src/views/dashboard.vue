@@ -197,7 +197,7 @@ onUnmounted(() => {
 
         <div v-if="!sortedCredentials.length" class="empty-box">
           还没有采集到凭证。先确认
-          <router-link class="link" to="/systems">系统配置</router-link>
+          <router-link class="link" to="/systems">影城配置</router-link>
           里的域名，再在微信里正常打开一次该影城的小程序。
         </div>
 

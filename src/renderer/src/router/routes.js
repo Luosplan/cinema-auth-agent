@@ -19,7 +19,7 @@ const routes = [
     path: '/systems',
     name: 'Systems',
     component: () => import('@views/systems.vue'),
-    meta: { title: '系统配置' }
+    meta: { title: '影城配置' }
   },
   {
     path: '/logs',

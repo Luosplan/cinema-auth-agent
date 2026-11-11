@@ -6,9 +6,19 @@ import { invoke } from '@utils/ipc'
 const rules = ref([])
 const drafts = reactive({})
 const inputs = reactive({})
-const savedHosts = reactive({})
+const saved = reactive({})
 const saving = ref('')
-const dirty = (id) => !!drafts[id] && drafts[id].hosts.join('|') !== savedHosts[id]
+
+/** 一份草稿的指纹：域名 + 开关 + 入口，任一处变了才允许保存 */
+function fingerprint(draft) {
+  if (!draft) return ''
+  const l = draft.launch || {}
+  return [draft.hosts.join('|'), draft.enabled ? '1' : '0', l.type || '', l.url || '', l.appid || ''].join(
+    '\u0001'
+  )
+}
+
+const dirty = (id) => !!drafts[id] && fingerprint(drafts[id]) !== saved[id]
 
 const EXPIRY_TEXT = {
   sliding: '滑动续期（有心跳就不失效）',
@@ -21,9 +31,14 @@ async function load() {
   for (const rule of rules.value) {
     drafts[rule.id] = {
       hosts: [...(rule.hosts || [])],
-      enabled: rule.enabled !== false
+      enabled: rule.enabled !== false,
+      launch: {
+        type: rule.launch?.type || '',
+        url: rule.launch?.url || '',
+        appid: rule.launch?.appid || ''
+      }
     }
-    savedHosts[rule.id] = drafts[rule.id].hosts.join('|')
+    saved[rule.id] = fingerprint(drafts[rule.id])
     if (!inputs[rule.id]) inputs[rule.id] = ''
   }
 }
@@ -50,15 +65,35 @@ function removeHost(ruleId, host) {
   if (idx > -1) list.splice(idx, 1)
 }
 
+/** 空对象会被当成「没配置」，显式给 null 才能真正清掉已有的入口 */
+function buildLaunch(draft) {
+  const type = draft.launch.type
+  if (!type) return null
+  const url = draft.launch.url.trim()
+  const appid = draft.launch.appid.trim()
+  if (!url && !appid) return null
+  const launch = { type }
+  if (url) launch.url = url
+  if (appid) launch.appid = appid
+  return launch
+}
+
 async function save(ruleId) {
+  const draft = drafts[ruleId]
+  const launch = buildLaunch(draft)
+  if (draft.launch.type && !launch) {
+    ElMessage.warning('填了入口类型就要给个链接或 appid，否则等于没配')
+    return
+  }
+
   saving.value = ruleId
   try {
-    const draft = drafts[ruleId]
     await invoke('config:update', {
       rules: {
         [ruleId]: {
           hosts: draft.hosts,
-          enabled: draft.enabled
+          enabled: draft.enabled,
+          launch
         }
       }
     })
@@ -79,9 +114,10 @@ onMounted(load)
     <div class="page-inner">
       <div class="page-head">
         <div>
-          <h1 class="page-title">系统配置</h1>
+          <h1 class="page-title">影城配置</h1>
           <p class="page-desc">
-            只有这里列出的域名会被解密，其余流量原样直通，不影响客户机上的其他网站。支持
+            每套出票程序在这里配两样：入口链接（点「获取参数」时用它打开页面，H5 和小程序都能填）
+            和解密域名（只有列出的域名会被解密，其余流量原样直通，不影响客户机上的其他网站）。支持
             <code class="mono">*.example.com</code> 通配。
           </p>
         </div>
@@ -99,6 +135,48 @@ onMounted(load)
               </span>
             </div>
             <el-switch v-model="drafts[rule.id].enabled" size="small" @change="save(rule.id)" />
+          </div>
+
+          <!-- 入口：点「获取参数」时用哪个地址打开。影城自己配了链接的优先用影城的，这里是兜底 -->
+          <div class="field">
+            <span class="field-label">入口</span>
+            <div class="field-body">
+              <div class="entry-row">
+                <el-select
+                  v-model="drafts[rule.id].launch.type"
+                  size="small"
+                  class="entry-type"
+                  placeholder="未设置"
+                >
+                  <el-option label="H5" value="h5" />
+                  <el-option label="小程序" value="miniapp" />
+                </el-select>
+                <el-input
+                  v-model="drafts[rule.id].launch.url"
+                  size="small"
+                  class="entry-url"
+                  :placeholder="
+                    drafts[rule.id].launch.type === 'miniapp'
+                      ? '小程序链接 / 短链，可留空（留空则用下面的 appid 唤起微信）'
+                      : 'https://h5.example.com/ticket'
+                  "
+                  clearable
+                />
+              </div>
+              <div v-if="drafts[rule.id].launch.type === 'miniapp'" class="entry-row">
+                <el-input
+                  v-model="drafts[rule.id].launch.appid"
+                  size="small"
+                  class="entry-url appid"
+                  placeholder="小程序 appid（没有链接时用它唤起微信，可留空）"
+                  clearable
+                />
+              </div>
+              <p class="entry-tip">
+                影城在后台配了自己的入口时优先用影城的；这里填的是这套程序的公共入口。
+                小程序没有可用的网页入口时，链接留空、填 appid 即可。
+              </p>
+            </div>
           </div>
 
           <div class="field">
@@ -121,15 +199,6 @@ onMounted(load)
                   @keyup.enter="addHost(rule.id)"
                 />
                 <el-button size="small" @click="addHost(rule.id)">添加</el-button>
-                <el-button
-                  size="small"
-                  type="primary"
-                  :loading="saving === rule.id"
-                  :disabled="!dirty(rule.id)"
-                  @click="save(rule.id)"
-                >
-                  保存
-                </el-button>
               </div>
             </div>
           </div>
@@ -137,6 +206,16 @@ onMounted(load)
           <div class="rule-foot">
             <span class="k">过期策略</span>
             <span class="v">{{ EXPIRY_TEXT[rule.expiry?.type] || '未知' }}</span>
+            <el-button
+              size="small"
+              type="primary"
+              class="foot-save"
+              :loading="saving === rule.id"
+              :disabled="!dirty(rule.id)"
+              @click="save(rule.id)"
+            >
+              保存
+            </el-button>
           </div>
         </div>
       </div>
@@ -262,6 +341,39 @@ onMounted(load)
   height: 26px;
 }
 
+/* 入口一行：类型下拉 + 链接输入，两个控件同高、左对齐 */
+.entry-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.entry-row + .entry-row {
+  margin-top: 6px;
+}
+
+.entry-type {
+  width: 96px;
+  flex: none;
+}
+
+.entry-url {
+  flex: 1;
+  min-width: 0;
+  max-width: 460px;
+}
+
+.entry-url.appid {
+  margin-left: 102px;
+}
+
+.entry-tip {
+  margin: 7px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--tx-4);
+}
+
 .rule-foot {
   display: flex;
   align-items: center;
@@ -277,6 +389,11 @@ onMounted(load)
 
 .rule-foot .v {
   color: var(--tx-3);
+}
+
+.foot-save {
+  margin-left: auto;
+  height: 26px;
 }
 
 code {

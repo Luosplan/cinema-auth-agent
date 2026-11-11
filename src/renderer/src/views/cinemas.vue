@@ -33,7 +33,6 @@ const filteredCinemas = computed(() => {
   if (!kw) return cinemas.value
   return cinemas.value.filter((c) => {
     if (String(c.name || '').toLowerCase().includes(kw)) return true
-    if (String(c.code || '').toLowerCase().includes(kw)) return true
     return (accountsMap.value[c.id] || []).some((a) =>
       String(a.accountId || '').toLowerCase().includes(kw)
     )
@@ -233,9 +232,9 @@ const dialogEntry = computed(() => {
   const url = String(cinema.accessUrl || '').trim()
   if (url) return { text: url, ok: true }
   if (String(cinema.accessType || '').toLowerCase() === 'miniapp') {
-    return { text: '仅小程序入口，需在微信里打开', ok: false }
+    return { text: '未配置链接，需在微信里打开小程序', ok: false }
   }
-  return { text: '后台没有配置 H5 入口地址', ok: false }
+  return { text: '后台没有配置入口链接', ok: false }
 })
 
 /** 抓包拿到的值，key → value；打开弹窗时清空，点「获取参数」才填 */
@@ -340,7 +339,7 @@ onMounted(async () => {
         <el-input
           v-model="keyword"
           size="small"
-          placeholder="搜索影城 / 编码 / 账号"
+          placeholder="搜索影城 / 账号"
           clearable
           class="search"
         />

@@ -201,6 +201,25 @@ function openEntry(rule, cinema = {}) {
 
   // 有 H5 地址就开窗，不管 accessType 写的是什么：能进页面才有流量
   if (url) {
+    // 小程序入口常常填的是 weixin:// 链接（scheme 码 / 短链），这类只能交给系统打开，
+    // 塞进 BrowserWindow 会直接 ERR_UNKNOWN_URL_SCHEME
+    if (/^weixin:\/\//i.test(url) || /^wx[a-z0-9]{16}$/i.test(url)) {
+      shell.openExternal(url).catch(() => {})
+      return {
+        ok: true,
+        mode: 'miniapp',
+        url,
+        hint: `已用微信打开 ${cinema.name || rule?.name || ''} 的小程序入口；若没反应，请在电脑版微信里手动打开，流量同样经过本机代理`
+      }
+    }
+
+    try {
+      // eslint-disable-next-line no-new
+      new URL(url)
+    } catch {
+      return { ok: false, message: `入口地址不是合法链接：${url}` }
+    }
+
     const userAgent = rule?.launch?.userAgent || MOBILE_UA
     if (paramFlowWindow && !paramFlowWindow.isDestroyed()) {
       paramFlowWindow.setTitle(`${cinema.name || rule?.name || ''} · 获取参数`)
