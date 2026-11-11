@@ -1,7 +1,7 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { invoke } from '@utils/ipc'
+import { invoke, on } from '@utils/ipc'
 import { auth, loadAuth } from '../stores/auth'
 import LoginDialog from '../components/LoginDialog.vue'
 import CopyIcon from '../components/CopyIcon.vue'
@@ -179,8 +179,26 @@ async function openParam(cinema) {
   paramValues.value = {}
   paramFrom.value = {}
   paramHint.value = ''
+  paramPageUrl.value = ''
+  paramPageError.value = ''
+  liveRows.value = []
   paramDialog.value = true
 }
+
+// 弹窗一关就停采集、卸掉页面：留着会继续跑接口，白占资源也白抓
+watch(paramDialog, (open) => {
+  if (open) return
+  paramPageUrl.value = ''
+  paramPageError.value = ''
+  if (paramWebContentsId) {
+    invoke('cinemas:detach-capture', { webContentsId: paramWebContentsId })
+    paramWebContentsId = 0
+  }
+  if (capturing.value) {
+    invoke('cinemas:capture-params:stop')
+    capturing.value = false
+  }
+})
 
 function openDetail(cinema) {
   dialogCinema.value = cinema
@@ -203,9 +221,12 @@ const dialogAccounts = computed(() => (dialogCinema.value ? rowsOf(dialogCinema.
  * captureConfig 是「抓包字段清单」：`[{ label: '手机号', key: 'mobile', required: true }]`。
  * 表里给运营看的是 label（手机号），抓包按 key（mobile）去匹配，两者都得留着。
  */
+/** 主进程按抓包规则兜底出来的参数行：后台没配 captureConfig 时靠它才有行可显示 */
+const liveRows = ref([])
+
 const dialogParamRows = computed(() => {
   const cfg = dialogCinema.value?.captureConfig
-  if (!cfg || typeof cfg !== 'object') return []
+  if (!cfg || typeof cfg !== 'object') return liveRows.value
 
   const list = Array.isArray(cfg) ? cfg : Array.isArray(cfg.fields) ? cfg.fields : null
   if (list) {
@@ -222,7 +243,8 @@ const dialogParamRows = computed(() => {
   }
 
   // 兜底：普通键值对象，字段名就是它的 key，没有 label
-  return Object.keys(cfg).map((key) => ({ key, label: key, required: null }))
+  const flat = Object.keys(cfg).map((key) => ({ key, label: key, required: null }))
+  return flat.length ? flat : liveRows.value
 })
 
 /** 入口说明：H5 地址来自影城自己的 accessUrl，没配的话只能靠微信打开小程序 */
@@ -244,51 +266,124 @@ const paramFrom = ref({})
 /** 打开入口的结果提示（唤起微信 / 已开 H5 窗口 / 没有入口） */
 const paramHint = ref('')
 const capturing = ref(false)
+/** 已经抓到几个：按钮和提示里实时反映进度，不然操作员不知道该不该继续等 */
+const capturedCount = computed(() => Object.keys(paramValues.value).length)
 
-/** 把 openEntry 的返回翻译成一句人话，区分「打开了」和「打不开」 */
-function launchHintOf(launch) {
-  if (!launch) return ''
-  if (!launch.ok) return launch.message || ''
-  if (launch.hint) return launch.hint
-  if (launch.mode === 'h5') return '已打开登录窗口，在窗口里完成登录即可，参数会自动回填'
-  return ''
+/** 弹窗里嵌入的入口页面地址：就是这家影城自己的 accessUrl，不是系统域名 */
+const paramPageUrl = ref('')
+const paramPageError = ref('')
+const paramPageUA = ref('')
+/** 内嵌页面用的 session 分区：登录态留着，同一家影城下次打开不用重登 */
+const paramPartition = ref('persist:param-web')
+const paramWebview = ref(null)
+
+/** <webview> 的事件不走 Vue 的事件绑定，只能拿到元素后自己挂 */
+let paramWebContentsId = 0
+
+function bindWebview(el) {
+  paramWebview.value = el
+  if (!el) return
+
+  /**
+   * 挂抓包。did-attach 和 dom-ready 都试一次：did-attach 偶尔在 ref 回调之前就
+   * 已经触发过了（页面挂得快），只挂 did-attach 会整轮静默抓不到东西。
+   */
+  const attach = () => {
+    if (paramWebContentsId) return
+    try {
+      const id = el.getWebContentsId()
+      if (!id) return
+      paramWebContentsId = id
+      invoke('cinemas:attach-capture', { webContentsId: id }).then((res) => {
+        if (res && res.ok === false) paramPageError.value = res.message || '挂载抓包失败'
+      })
+    } catch (e) {
+      paramPageError.value = `挂载抓包失败：${e.message}`
+    }
+  }
+
+  // 页面一挂上就接抓包：之后所有响应都由主进程通过调试协议旁听
+  el.addEventListener('did-attach', attach)
+  el.addEventListener('did-fail-load', (e) => {
+    // -3 是「用户主动中止加载」，不是错误
+    if (e.errorCode === -3) return
+    paramPageError.value = `页面加载失败（${e.errorCode} ${e.errorDescription || ''}）`
+  })
+  el.addEventListener('did-start-loading', () => {
+    paramPageError.value = ''
+  })
+  el.addEventListener('dom-ready', () => {
+    paramPageError.value = ''
+    attach()
+  })
 }
 
 async function captureParams() {
   const cinema = dialogCinema.value
   if (!cinema) return
-  const keys = dialogParamRows.value.map((row) => row.key)
-  if (!keys.length) {
-    ElMessage.warning('该影城没有配置抓包参数')
-    return
+  const rows = dialogParamRows.value
+  const keys = rows.map((row) => row.key)
+  // 入口地址在影城自己身上（CinemaGroup.accessUrl），不是所有影城共用一个
+  const payload = {
+    name: cinema.name,
+    accessUrl: cinema.accessUrl || '',
+    accessType: cinema.accessType || '',
+    accessAppId: cinema.accessAppId || ''
   }
 
   capturing.value = true
-  paramHint.value = ''
+  paramHint.value = '正在启动采集并打开入口…'
+  paramPageError.value = ''
+
+  // 1) 先把代理和解密白名单备好，再把页面塞进 webview —— 顺序反了，首跳流量就漏了
+  try {
+    const prep = await invoke('cinemas:prepare-params', { cinema: payload })
+    if (!prep?.ok) {
+      ElMessage.error(prep?.message || '打开入口失败')
+      capturing.value = false
+      paramHint.value = ''
+      return
+    }
+    // 同一个地址再点一次也要真的重新加载（页面可能已经跳到别处）
+    paramPageUrl.value = ''
+    await nextTick()
+    paramPageUA.value = prep.userAgent || ''
+    paramPartition.value = prep.partition || 'persist:param-web'
+    paramPageUrl.value = prep.url
+    paramHint.value = '页面已打开：在里面登录一次，抓到的值会自动回填'
+  } catch (e) {
+    ElMessage.error(e.message || '打开入口失败')
+    capturing.value = false
+    return
+  }
+
+  // 2) 页面加载和抓包并行：抓包这一轮会一直扫，抓到就推回来
   try {
     const res = await invoke('cinemas:capture-params', {
       keys,
+      // 后台没配 captureConfig 时主进程按规则兜底，行也一并回传，弹窗照常显示
+      rows,
       systemCode: cinema.systemCode || '',
-      // 入口地址在影城自己身上（CinemaGroup.accessUrl），不是所有影城共用一个
-      cinema: {
-        name: cinema.name,
-        accessUrl: cinema.accessUrl || '',
-        accessType: cinema.accessType || '',
-        accessAppId: cinema.accessAppId || ''
-      },
-      waitMs: 25000
+      cinema: payload,
+      // 页面已经由 webview 打开，这里只抓不打开
+      launch: false,
+      // 登录要输账号、等验证码，给两分钟
+      waitMs: 120000
     })
     if (!res?.ok) {
       ElMessage.error(res?.message || '获取失败')
       return
     }
-    paramHint.value = launchHintOf(res.launch)
-    const values = res.values || {}
-    paramValues.value = { ...paramValues.value, ...values }
+    if (Array.isArray(res.rows) && res.rows.length) liveRows.value = res.rows
+    // 推送是增量的，这里再兜一次底：推送丢了也能拿到最终结果
+    paramValues.value = { ...paramValues.value, ...(res.values || {}) }
     paramFrom.value = { ...paramFrom.value, ...(res.from || {}) }
-    const got = Object.keys(values).length
-    if (!got) {
-      ElMessage.warning('这次没有抓到数据，请先打开该系统完成一次登录')
+
+    const got = Object.keys(paramValues.value).length
+    if (!keys.length) {
+      ElMessage.info(res.message || '该程序没有声明抓包字段，入口已打开')
+    } else if (!got) {
+      ElMessage.warning('这次没有抓到数据，请在上面的页面里完成一次登录')
     } else if (res.missing?.length) {
       ElMessage.warning(`已获取 ${got} 个参数，${res.missing.length} 个还没抓到`)
     } else {
@@ -299,6 +394,13 @@ async function captureParams() {
   } finally {
     capturing.value = false
   }
+}
+
+/** 停止采集：主进程里那一轮等待会自己退出，已经抓到的值保留 */
+async function stopCapture() {
+  await invoke('cinemas:capture-params:stop')
+  capturing.value = false
+  paramHint.value = '已停止采集'
 }
 
 /** 提示里用 label（手机号），不要甩出 key（mobile）——页面上给人看的是前者
@@ -326,9 +428,23 @@ async function refreshAll() {
   await reload()
 }
 
+/** 采集推送的订阅句柄：抓包是持续的，值随登录进度陆续到，不能只靠一次请求的返回 */
+let offParamUpdate = null
+
 onMounted(async () => {
   await loadAuth()
   if (auth.loggedIn) await reload()
+
+  offParamUpdate = on('param-capture:update', (payload) => {
+    // 弹窗没开或已经停了就不往界面上糊数据
+    if (!paramDialog.value || !capturing.value) return
+    if (payload?.values) paramValues.value = { ...paramValues.value, ...payload.values }
+    if (payload?.from) paramFrom.value = { ...paramFrom.value, ...payload.from }
+  })
+})
+
+onUnmounted(() => {
+  if (offParamUpdate) offParamUpdate()
 })
 </script>
 
@@ -493,62 +609,86 @@ onMounted(async () => {
 
     <LoginDialog v-model="loginOpen" @success="reload" />
 
-    <!-- 参数：只留采集参数表，影城信息挪到标题里，省掉六行占位 -->
+    <!-- 参数：左边字段表，右边直接嵌该影城的入口页面，登录和回填在同一屏完成 -->
     <el-dialog
       v-model="paramDialog"
       :title="dialogCinema ? `影城参数 · ${dialogCinema.name}` : '影城参数'"
-      width="600px"
+      width="980px"
       align-center
+      class="param-dialog"
     >
-      <div v-if="dialogCinema" class="dlg">
-        <div class="p-entry">
-          <span class="p-entry-k">入口</span>
-          <span class="p-entry-v mono" :class="{ dim: !dialogEntry.ok }" :title="dialogEntry.text">
-            {{ dialogEntry.text }}
-          </span>
+      <div v-if="dialogCinema" class="dlg p-split">
+        <div class="p-left">
+          <div class="p-entry">
+            <span class="p-entry-k">入口</span>
+            <span class="p-entry-v mono" :class="{ dim: !dialogEntry.ok }" :title="dialogEntry.text">
+              {{ dialogEntry.text }}
+            </span>
+          </div>
+          <div v-if="dialogParamRows.length" class="param-wrap">
+            <table class="param-table">
+              <thead>
+                <tr>
+                  <th class="p-name">参数名称</th>
+                  <th>参数值</th>
+                  <th class="p-required">是否必填</th>
+                  <th class="p-op-head">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in dialogParamRows" :key="row.key">
+                  <td :title="row.label">{{ row.label }}</td>
+                  <td class="mono p-val" :title="paramValues[row.key] || ''">
+                    <template v-if="paramValues[row.key]">
+                      <span class="p-text">{{ paramValues[row.key] }}</span>
+                      <span v-if="paramFrom[row.key]" class="p-src">{{ paramFrom[row.key] }}</span>
+                    </template>
+                    <span v-else class="dim">—</span>
+                  </td>
+                  <td class="p-required">
+                    <span v-if="row.required === true" class="p-yes">是</span>
+                    <span v-else-if="row.required === false" class="dim">否</span>
+                    <span v-else class="dim">—</span>
+                  </td>
+                  <td class="p-op">
+                    <button class="op-link" @click="copyParam(row)">复制</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-else class="empty-cell">该影城没有额外的采集参数</div>
+          <div v-if="capturing || paramHint" class="p-hint">
+            <template v-if="capturing">
+              {{ paramHint || '正在打开入口：在右边页面里登录一次，抓到的值会自动回填' }}
+              <span v-if="capturedCount" class="p-count">已抓 {{ capturedCount }} 个</span>
+            </template>
+            <template v-else>{{ paramHint }}</template>
+          </div>
         </div>
-        <div v-if="dialogParamRows.length" class="param-wrap">
-          <table class="param-table">
-            <thead>
-              <tr>
-                <th class="p-name">参数名称</th>
-                <th>参数值</th>
-                <th class="p-required">是否必填</th>
-                <th class="p-op-head">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in dialogParamRows" :key="row.key">
-                <td :title="row.label">{{ row.label }}</td>
-                <td class="mono p-val" :title="paramValues[row.key] || ''">
-                  <template v-if="paramValues[row.key]">
-                    <span class="p-text">{{ paramValues[row.key] }}</span>
-                    <span v-if="paramFrom[row.key]" class="p-src">{{ paramFrom[row.key] }}</span>
-                  </template>
-                  <span v-else class="dim">—</span>
-                </td>
-                <td class="p-required">
-                  <span v-if="row.required === true" class="p-yes">是</span>
-                  <span v-else-if="row.required === false" class="dim">否</span>
-                  <span v-else class="dim">—</span>
-                </td>
-                <td class="p-op">
-                  <button class="op-link" @click="copyParam(row)">复制</button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div v-else class="empty-cell">该影城没有额外的采集参数</div>
-        <div v-if="capturing || paramHint" class="p-hint">
-          {{ capturing ? paramHint || '正在打开该系统，请在里面登录一次，抓到的值会自动回填…' : paramHint }}
+
+        <div class="p-right">
+          <webview
+            v-if="paramPageUrl"
+            :ref="bindWebview"
+            :src="paramPageUrl"
+            :partition="paramPartition"
+            :useragent="paramPageUA"
+            class="p-web"
+            allowpopups
+          />
+          <div v-else class="p-web-empty">
+            点「获取参数」后，这里会打开这家影城的入口页面
+          </div>
+          <div v-if="paramPageError" class="p-web-err">{{ paramPageError }}</div>
         </div>
       </div>
 
       <template #footer>
         <el-button size="small" @click="paramDialog = false">取消</el-button>
+        <el-button v-if="capturing" size="small" @click="stopCapture">停止</el-button>
         <el-button size="small" type="primary" :loading="capturing" @click="captureParams">
-          获取参数
+          {{ capturing ? `采集中 ${capturedCount}` : '获取参数' }}
         </el-button>
       </template>
     </el-dialog>
@@ -915,6 +1055,56 @@ tbody tr:hover td {
   font-size: 12.5px;
 }
 
+/* ── 参数弹窗：左边字段表，右边内嵌入口页面 ── */
+
+.p-split {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.p-left {
+  flex: 1;
+  min-width: 0;
+}
+
+.p-right {
+  width: 340px;
+  flex: none;
+}
+
+/* webview 是原生标签，尺寸必须显式给，不然塌成 0 高 */
+.p-web {
+  display: flex;
+  width: 340px;
+  height: 560px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+}
+
+.p-web-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 340px;
+  height: 560px;
+  padding: 0 28px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--tx-4);
+  font-size: 11.5px;
+  line-height: 1.7;
+  text-align: center;
+}
+
+.p-web-err {
+  margin-top: 6px;
+  color: var(--err);
+  font-size: 11px;
+}
+
 .dlg-row {
   display: flex;
   gap: 12px;
@@ -1042,6 +1232,12 @@ tbody tr:hover td {
   font-size: 11px;
   line-height: 1.6;
   color: var(--tx-4);
+}
+
+/* 已抓数量跟在提示后面，同色弱化，不要抢了「在窗口里登录」这句主信息的注意力 */
+.p-count {
+  margin-left: 6px;
+  color: var(--ok);
 }
 
 .mini {

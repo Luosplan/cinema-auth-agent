@@ -22,6 +22,8 @@
 
 export default class Extractor {
   constructor(rules = []) {
+    /** 「获取参数」时按影城入口链接临时放行的域名，不属于任何正式规则 */
+    this.extraHosts = []
     this.setRules(rules)
   }
 
@@ -34,12 +36,35 @@ export default class Extractor {
   }
 
   /**
-   * 供 MitmProxy 判定是否需要解密。任一规则命中即解密。
+   * 按入口链接临时放行要解密的域名。
+   *
+   * 为什么需要：规则是「按出票系统」写的，但同一个系统几十家影城各有一条入口链接，
+   * 链接域名往往不在规则里（甚至连后端接口都在另一个子域）。没有这条，
+   * 代理只会把流量原样隧道转发，页面上再怎么登录也抓不到一个字节。
+   */
+  allowHosts(patterns = []) {
+    const merged = new Set(this.extraHosts || [])
+    for (const pattern of patterns) {
+      if (pattern) merged.add(String(pattern).toLowerCase())
+    }
+    this.extraHosts = [...merged]
+  }
+
+  clearExtraHosts() {
+    this.extraHosts = []
+  }
+
+  /**
+   * 供 MitmProxy 判定是否需要解密。任一规则或临时放行的入口域名命中即解密。
+   * 返回值只用来判真假，入口临时域名给一个占位对象便于日志排查。
    */
   matchHost(host) {
     if (!host) return null
     for (const rule of this.rules) {
       if (this.hostMatches(rule, host)) return rule
+    }
+    if ((this.extraHosts || []).some((pattern) => matchDomain(pattern, host))) {
+      return { id: '__entry__', name: '影城入口链接', hosts: this.extraHosts }
     }
     return null
   }

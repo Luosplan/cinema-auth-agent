@@ -20,7 +20,18 @@ export default defineConfig({
       },
       extensions: ['.mjs', '.js', '.ts', '.jsx', '.tsx', '.json', '.vue']
     },
-    plugins: [vue(), UnoCSS()],
+    plugins: [
+      vue({
+        template: {
+          compilerOptions: {
+            // <webview> 是 Electron 提供的原生标签，不是 Vue 组件；
+            // 不声明会被当成未知自定义元素，白名单里过一遍才不报警告
+            isCustomElement: (tag) => tag === 'webview'
+          }
+        }
+      }),
+      UnoCSS()
+    ],
     css: {
       preprocessorOptions: {
         scss: {

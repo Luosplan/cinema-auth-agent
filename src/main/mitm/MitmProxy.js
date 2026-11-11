@@ -24,6 +24,8 @@ export default class MitmProxy {
     this.server = null
     this.mitmServer = null
     this.port = 0
+    /** 所有活着的连接：停代理时要主动切断，否则 close 会一直等它们 */
+    this.sockets = new Set()
     this.onCapture = null
     this.onLog = null
     this.stats = { total: 0, intercepted: 0, tunneled: 0, failed: 0 }
@@ -32,6 +34,11 @@ export default class MitmProxy {
   start(preferredPort = 9090) {
     return new Promise((resolve, reject) => {
       const server = http.createServer((req, res) => this.handlePlain(req, res))
+
+      server.on('connection', (socket) => {
+        this.sockets.add(socket)
+        socket.on('close', () => this.sockets.delete(socket))
+      })
 
       server.on('connect', (req, socket, head) => {
         this.handleConnect(req, socket, head)
@@ -249,13 +256,29 @@ export default class MitmProxy {
   }
 
   async stop() {
-    await new Promise((resolve) => {
-      if (!this.server) return resolve()
-      this.server.close(() => resolve())
-      // 已建立的隧道不能等，直接断开引用让 OS 回收
-      this.server = null
-    })
+    const server = this.server
+    this.server = null
     this.mitmServer = null
+    if (!server) return
+
+    // 参数窗口的 keep-alive 连接不会自己断，server.close 会一直等它 —— 先主动切开。
+    // 不切的表现就是点「停止」后按钮一直转、UI 像死了一样。
+    for (const socket of this.sockets) {
+      try {
+        socket.destroy()
+      } catch {
+        /* 已经断了的忽略 */
+      }
+    }
+    this.sockets.clear()
+
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 1500)
+      server.close(() => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
   }
 }
 
