@@ -147,12 +147,6 @@ function typeText(cinema) {
   return cinema?.accessType || cinema?.protocol || '—'
 }
 
-function priorityText(acc) {
-  const p = Number(acc?.priority || 0)
-  if (!p) return ''
-  return p === 1 ? '首选' : `#${p}`
-}
-
 async function loadTree() {
   loading.value = true
   error.value = ''
@@ -265,7 +259,8 @@ async function toggleAutoRenew(cinema, value) {
   }
 }
 
-const dialogAccounts = computed(() => (dialogCinema.value ? rowsOf(dialogCinema.value) : []))
+/** 详情弹窗里展示的关联影城列表（服务端随 group-tree 下发） */
+const dialogCinemas = computed(() => dialogCinema.value?.cinemas || [])
 
 /**
  * captureConfig 是「抓包字段清单」：`[{ label: '手机号', key: 'mobile', required: true }]`。
@@ -925,10 +920,9 @@ onUnmounted(() => {
     <el-dialog v-model="detailDialog" title="影城详情" width="560px" align-center>
       <div v-if="dialogCinema" class="dlg">
         <div class="dlg-row"><span class="k">影城</span><span class="v">{{ dialogCinema.name }}</span></div>
-        <div class="dlg-row"><span class="k">编码</span><span class="v mono">{{ dialogCinema.code || '—' }}</span></div>
         <div class="dlg-row"><span class="k">类型</span><span class="v">{{ typeText(dialogCinema) }}</span></div>
-        <div class="dlg-row">
-          <span class="k">入口链接</span>
+        <div v-if="typeOf(dialogCinema) === 'h5'" class="dlg-row">
+          <span class="k">影城链接</span>
           <span class="v mono dlg-link">
             <span v-if="dialogCinema.accessUrl" class="dlg-link-text" :title="dialogCinema.accessUrl">
               {{ dialogCinema.accessUrl }}
@@ -938,38 +932,35 @@ onUnmounted(() => {
               v-if="dialogCinema.accessUrl"
               class="copy-btn"
               type="button"
-              title="复制入口链接"
-              aria-label="复制入口链接"
+              title="复制影城链接"
+              aria-label="复制影城链接"
               @click="copyEntryUrl(dialogCinema)"
             >
               <CopyIcon />
             </button>
           </span>
         </div>
-        <div class="dlg-row">
-          <span class="k">appId</span>
-          <span class="v mono">{{ dialogCinema.accessAppId || '—' }}</span>
-        </div>
 
         <div class="dlg-block">
-          <div class="k">出票账号</div>
+          <div class="k">关联影城</div>
           <table class="mini">
             <thead>
               <tr>
-                <th>账号</th>
-                <th>优先</th>
-                <th>状态</th>
-                <th>会员卡</th>
-                <th>优惠券</th>
+                <th class="center-head">影城名称</th>
+                <th class="center-head">城市</th>
+                <th class="center-head">专资号</th>
+                <th class="center-head">地址</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="(acc, i) in dialogAccounts" :key="i">
-                <td class="mono">{{ acc?.accountId || '—' }}</td>
-                <td>{{ priorityText(acc) || '—' }}</td>
-                <td>{{ acc ? (isEnabled(acc) ? '启用' : '停用') : '—' }}</td>
-                <td>{{ acc?.memberCardCount ?? '—' }}</td>
-                <td>{{ acc?.couponCount ?? '—' }}</td>
+              <tr v-for="c in dialogCinemas" :key="c.id">
+                <td>{{ c.name || '—' }}</td>
+                <td>{{ c.city || '—' }}</td>
+                <td class="mono">{{ c.standardId || '—' }}</td>
+                <td>{{ c.address || '—' }}</td>
+              </tr>
+              <tr v-if="!dialogCinemas.length">
+                <td colspan="4" class="dim">未关联影城</td>
               </tr>
             </tbody>
           </table>
