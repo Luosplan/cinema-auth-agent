@@ -66,9 +66,15 @@ const MOBILE_UA =
  * 「获取参数」专用分区。单独隔一个 session，只为了三件事：
  *   1. 能把代理固定指向本机（不依赖系统代理有没有被 Chromium 感知到）
  *   2. 只对这个窗口放行 MITM 证书错误，主窗口照常严格校验
- *   3. 登录态留在分区里，同一个系统第二次打开不用重新登录
+ *   3. 登录态留在分区里，同一家影城第二次打开不用重新登录；
+ *      换影城则由 resetParamStorageIfCinemaChanged 清掉，防止串号
  */
 const PARAM_PARTITION = 'persist:param-flow'
+/**
+ * 弹窗里 <webview> 用的采集分区（在 router 里定义同名字符串，两边必须保持一致）。
+ * 两个分区都是 persist:*，cookie/localStorage 会一直留着 —— 这正是下面要解决的问题。
+ */
+const PARAM_WEB_PARTITION = 'persist:param-web'
 /** webRequest 每个事件只允许一个监听器，重复设置会互相覆盖，这里只装一次 */
 /** 已经挡过 sw.js 的分区：webRequest 同事件只能挂一个监听器，重复挂会互相覆盖 */
 const swBlockedPartitions = new Set()
@@ -256,6 +262,31 @@ async function resetParamSession() {
   } catch {
     /* 还原失败不影响主流程 */
   }
+}
+
+/**
+ * 参数采集分区是持久化的，cookie/localStorage 会一直留着。
+ * 凤凰系这类 H5 各家影城共用同一个域（mtop.yuekeyun.com），存储按域共享 ——
+ * 上一家影城登录时写下的 sid/tid，切到没登录的影城还在原地，
+ * readPageStorage 会把别家账号当成这家的捞出来，填进参数弹窗。
+ *
+ * 所以每轮采集开始先按影城比对：换影城就清空两个采集分区的存储，强制重新登录，
+ * 页面上留下的只能是这家影城的账号；同一家影城不清，重抓还能复用登录态
+ * （凤凰系有些参数只在登录响应里出现一次，全靠本地存储兜底）。
+ */
+let lastParamCinemaKey = ''
+async function resetParamStorageIfCinemaChanged(cinema = {}) {
+  const key = String(cinema.id || cinema.code || cinema.name || '')
+  if (key && key === lastParamCinemaKey) return { switched: false }
+  lastParamCinemaKey = key
+  for (const partition of [PARAM_PARTITION, PARAM_WEB_PARTITION]) {
+    try {
+      await session.fromPartition(partition).clearStorageData()
+    } catch {
+      /* 清不掉不挡主流程 */
+    }
+  }
+  return { ok: true }
 }
 
 /**
@@ -997,6 +1028,8 @@ app.whenReady().then(async () => {
   ctx.mobileUA = MOBILE_UA
   ctx.prepareCaptureSession = prepareCaptureSession
   ctx.resetParamSession = resetParamSession
+  /** 换影城采集时清空采集分区的存储，防止把上一家影城的登录态读成这家的 */
+  ctx.resetParamStorageIfCinemaChanged = resetParamStorageIfCinemaChanged
   /** 内嵌页面旁听抓包（CDP Network），页面本身直连，不经过代理 */
   ctx.attachPageCapture = attachPageCapture
   ctx.detachPageCapture = detachPageCapture

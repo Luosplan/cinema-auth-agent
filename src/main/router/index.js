@@ -362,6 +362,19 @@ routers.push(
       }
     }
 
+    /**
+     * 换影城必须清存储：采集分区是持久化的，凤凰系这类 H5 各家影城同域，
+     * 上一家影城登录写下的 cookie/localStorage 还在，不清的话
+     * readPageStorage 会把别家账号读成这家的。同一家影城不清，重抓复用登录态。
+     */
+    if (typeof ctx.resetParamStorageIfCinemaChanged === 'function') {
+      try {
+        await ctx.resetParamStorageIfCinemaChanged(cinema)
+      } catch {
+        /* 清不掉不挡主流程 */
+      }
+    }
+
     return {
       ok: true,
       mode: 'h5',
@@ -454,6 +467,14 @@ routers.push(
     // 这批 H5 一旦套代理就渲染不出来，抓包改由 CDP 旁听响应体。
     let launch = null
     if (params.launch !== false && typeof ctx.openEntry === 'function') {
+      // 渲染进程可能跳过 prepare-params 直接点采集，这里再兜一次换影城清存储
+      if (!isMiniapp && typeof ctx.resetParamStorageIfCinemaChanged === 'function') {
+        try {
+          await ctx.resetParamStorageIfCinemaChanged(cinema)
+        } catch {
+          /* 清不掉不挡主流程 */
+        }
+      }
       try {
         launch = await ctx.openEntry(activeRule, cinema)
         // 小程序没有可打开的链接，只能按 appid 走 launchapplet（见 wx/WxUi.js）

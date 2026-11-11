@@ -11,6 +11,8 @@ const tree = ref([])
 const autoRenew = ref({})
 const accountsMap = ref({})
 const keyword = ref('')
+/** 接入方式筛选：'' 全部 / h5 / miniapp */
+const typeFilter = ref('')
 const loading = ref(false)
 const accountsLoading = ref(false)
 const error = ref('')
@@ -28,10 +30,19 @@ const activeSystem = computed(() => tree.value.find((s) => s.id === activeSystem
 
 const cinemas = computed(() => activeSystem.value?.children || [])
 
+/** 归一化接入方式：accessType 是 h5 / miniapp，个别数据只有 protocol */
+function typeOf(cinema) {
+  const raw = String(cinema?.accessType || cinema?.protocol || '').toLowerCase()
+  if (raw === 'h5') return 'h5'
+  if (raw === 'miniapp' || raw === 'miniprogram' || raw === 'wx') return 'miniapp'
+  return ''
+}
+
 const filteredCinemas = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
-  if (!kw) return cinemas.value
   return cinemas.value.filter((c) => {
+    if (typeFilter.value && typeOf(c) !== typeFilter.value) return false
+    if (!kw) return true
     if (String(c.name || '').toLowerCase().includes(kw)) return true
     return (accountsMap.value[c.id] || []).some((a) =>
       String(a.accountId || '').toLowerCase().includes(kw)
@@ -114,11 +125,11 @@ async function copyAccountId(acc) {
   else ElMessage.warning('剪贴板不可用，请检查系统权限')
 }
 
-/** 出票程序接入方式：accessType 是 h5 / miniapp，个别数据只有 protocol */
+/** 出票程序接入方式展示 */
 function typeText(cinema) {
-  const raw = String(cinema?.accessType || cinema?.protocol || '').toLowerCase()
-  if (raw === 'h5') return 'H5'
-  if (raw === 'miniapp' || raw === 'miniprogram' || raw === 'wx') return '小程序'
+  const t = typeOf(cinema)
+  if (t === 'h5') return 'H5'
+  if (t === 'miniapp') return '小程序'
   return cinema?.accessType || cinema?.protocol || '—'
 }
 
@@ -604,6 +615,16 @@ onUnmounted(() => {
     <div class="head">
       <h1 class="head-title">影城账号</h1>
       <div class="head-actions">
+        <el-select
+          v-model="typeFilter"
+          size="small"
+          placeholder="类型"
+          class="type-filter"
+        >
+          <el-option label="全部类型" value="" />
+          <el-option label="H5" value="h5" />
+          <el-option label="小程序" value="miniapp" />
+        </el-select>
         <el-input
           v-model="keyword"
           size="small"
@@ -943,6 +964,10 @@ onUnmounted(() => {
 
 .search {
   width: 200px;
+}
+
+.type-filter {
+  width: 110px;
 }
 
 /* ---- 空态 ---- */
