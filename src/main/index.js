@@ -61,7 +61,8 @@ const MOBILE_UA =
  */
 const PARAM_PARTITION = 'persist:param-flow'
 /** webRequest 每个事件只允许一个监听器，重复设置会互相覆盖，这里只装一次 */
-let paramSwBlocked = false
+/** 已经挡过 sw.js 的分区：webRequest 同事件只能挂一个监听器，重复挂会互相覆盖 */
+const swBlockedPartitions = new Set()
 
 const ctx = {
   config: null,
@@ -210,14 +211,17 @@ function updateTrayMenu() {
  * 不再把它拧到本机代理 —— 这批 H5 一进代理整页就渲染不出来（同一条链接直连正常），
  * 参数抓取已经改成在内嵌页面里用 CDP 旁听，页面必须保持直连才看得见内容。
  *
- * 挡 sw.js 的理由还在：页面一进来就注册 ServiceWorker 接管 fetch，
- * 之后拿到的都是缓存副本，操作员登录后看到的可能是旧页面，反而更难判断状态。
+ * 为什么每个分区都要挡 sw.js：
+ *   注册了 ServiceWorker 之后，页面的 fetch 由 SW 自己接管再转发，
+ *   请求归属到 SW 那个 target 上 —— 页面会话里看得到 requestWillBeSent，
+ *   getResponseBody 却一律报「No resource with given identifier found」，
+ *   于是响应体全丢、cookie 也时有时无。挡掉之后请求回到普通网络栈，才能读到体。
  */
-async function prepareParamSession() {
-  const sess = session.fromPartition(PARAM_PARTITION)
+async function prepareCaptureSession(partition = PARAM_PARTITION) {
+  const sess = session.fromPartition(partition)
 
-  if (!paramSwBlocked) {
-    paramSwBlocked = true
+  if (!swBlockedPartitions.has(partition)) {
+    swBlockedPartitions.add(partition)
     sess.webRequest.onBeforeRequest((details, callback) => {
       if (/\/sw\.js(\?|$)/i.test(String(details.url || ''))) {
         return callback({ cancel: true })
@@ -256,6 +260,8 @@ async function resetParamSession() {
  * 附带好处：不再改系统代理，进程被杀也不会留下代理残留把客户机搞断网。
  */
 const debuggerSessions = new Map()
+/** 抓包健康度：取体成功/失败、ExtraInfo 是否真的来了 —— 抓不到参数时先看这里 */
+const cdpStats = { attach: 0, bodyOk: 0, bodyFail: 0, extraInfo: 0, lastFail: '' }
 
 async function attachPageCapture(webContentsId) {
   const id = Number(webContentsId || 0)
@@ -271,6 +277,12 @@ async function attachPageCapture(webContentsId) {
   }
 
   const requests = new Map()
+  /**
+   * ExtraInfo 有时比 requestWillBeSent 先到（Chromium 两条事件不是同一个时序保证），
+   * 先到的那份必须暂存下来，否则整条记录的 Cookie 就丢了 ——
+   * 表现为「明明登录了，cookie 里就是少字段」。
+   */
+  const earlyExtra = new Map()
   // 只在开发/排查时需要，生产日志里刷屏没意义
   const trace = Boolean(process.env.CINEMA_CDP_TRACE)
   let bodyFail = 0
@@ -297,10 +309,12 @@ async function attachPageCapture(webContentsId) {
     }
 
     if (method === 'Network.requestWillBeSent') {
+      const early = earlyExtra.get(params.requestId)
+      if (early) earlyExtra.delete(params.requestId)
       requests.set(params.requestId, {
         url: params.request?.url || '',
         method: params.request?.method || 'GET',
-        reqHeaders: { ...(params.request?.headers || {}) },
+        reqHeaders: { ...(early || {}), ...(params.request?.headers || {}) },
         reqBody: params.request?.postData ? String(params.request.postData) : '',
         sessionId
       })
@@ -313,8 +327,14 @@ async function attachPageCapture(webContentsId) {
      * 而 H5 的 tid / _m_h5_tk 恰恰只在 cookie 里，漏了这一步等于白挂。
      */
     if (method === 'Network.requestWillBeSentExtraInfo') {
+      cdpStats.extraInfo += 1
       const item = requests.get(params.requestId)
-      if (!item) return
+      if (!item) {
+        earlyExtra.set(params.requestId, params.headers || {})
+        // 攒太多说明配对一直没来，防内存漏水
+        if (earlyExtra.size > 500) earlyExtra.delete(earlyExtra.keys().next().value)
+        return
+      }
       item.reqHeaders = { ...item.reqHeaders, ...(params.headers || {}) }
       return
     }
@@ -323,7 +343,8 @@ async function attachPageCapture(webContentsId) {
       const item = requests.get(params.requestId)
       if (!item) return
       item.statusCode = params.response?.status
-      item.resHeaders = { ...(params.response?.headers || {}) }
+      // 合并而不是覆盖：ExtraInfo 里可能已经有 Set-Cookie 了
+      item.resHeaders = { ...(item.resHeaders || {}), ...(params.response?.headers || {}) }
       item.mimeType = params.response?.mimeType || ''
       return
     }
@@ -392,6 +413,7 @@ async function attachPageCapture(webContentsId) {
             }
           }
           bodyOk += 1
+          cdpStats.bodyOk += 1
           if (trace && bodyOk <= 30) {
             log('info', `[cdp] ${item.mimeType} ${body.length}B ${item.url.slice(0, 70)}`)
           }
@@ -400,6 +422,8 @@ async function attachPageCapture(webContentsId) {
         .catch((e) => {
           // 重定向、304、缓存命中本来就没有响应体，取不到属正常，记录照样上报
           bodyFail += 1
+          cdpStats.bodyFail += 1
+          cdpStats.lastFail = `${e.message} ${String(item.url).slice(0, 60)}`
           if (trace && bodyFail <= 10) log('warn', `[cdp] 取响应体失败：${e.message}`)
           emit('')
         })
@@ -448,6 +472,119 @@ function detachPageCapture(webContentsId) {
 }
 
 /**
+ * 找到「获取参数」用的内嵌页面。
+ *
+ * 为什么不靠渲染进程传 id：页面是后挂上去的，点「获取参数」那一刻 id 还拿不到，
+ * 传过来就是 0。主进程自己按 webview 类型 + 入口域名找，省掉一次时序协同。
+ */
+function findGuestPage(hint = '') {
+  let list = []
+  try {
+    list = webContents.getAllWebContents().filter((wc) => {
+      try {
+        return wc.getType() === 'webview' && !wc.isDestroyed()
+      } catch {
+        return false
+      }
+    })
+  } catch {
+    return 0
+  }
+  if (!list.length) return 0
+  const key = String(hint || '').toLowerCase()
+  if (!key) return list[0].id
+  const hit = list.find((wc) => String(wc.getURL() || '').toLowerCase().includes(key))
+  return (hit || list[0]).id
+}
+
+/**
+ * 直接读内嵌页面自己的存储。
+ *
+ * 有些参数天生抓不到：登录成功时接口只回一次，之后值就常驻在页面的 localStorage 里
+ * （凤凰系的 tid / sid 就是这种），操作员登录完再点「获取参数」，流量里根本不会再出现它们。
+ * 与其让运营去翻控制台，不如到页面存储里把同名字段捞出来 —— 值本来就是页面自己存着的。
+ */
+async function readPageStorage(webContentsId) {
+  const id = Number(webContentsId || 0)
+  const entry = debuggerSessions.get(id)
+  if (!entry?.dbg) return { ok: false, message: '页面还没接上调试协议' }
+
+  const expression = `(() => {
+    const dump = (store) => {
+      const out = {}
+      for (let i = 0; i < store.length; i += 1) {
+        const key = store.key(i)
+        if (!key) continue
+        // 单个条目限长：有的系统把整包配置塞进去，全量搬回来既慢也没用
+        out[key] = String(store.getItem(key) == null ? '' : store.getItem(key)).slice(0, 60000)
+      }
+      return out
+    }
+    return JSON.stringify({
+      url: String(location.href || ''),
+      title: String(document.title || ''),
+      cookie: String(document.cookie || ''),
+      local: dump(window.localStorage),
+      session: dump(window.sessionStorage)
+    })
+  })()`
+
+  try {
+    const res = await entry.dbg.sendCommand('Runtime.evaluate', {
+      expression,
+      returnByValue: true,
+      awaitPromise: false
+    })
+    const raw = res?.result?.value
+    if (!raw) return { ok: false, message: '页面暂时读不到存储' }
+    return { ok: true, data: JSON.parse(raw) }
+  } catch (e) {
+    return { ok: false, message: e.message }
+  }
+}
+
+/**
+ * 把页面存储拍成一条「伪抓包记录」，好复用同一套按名匹配。
+ *
+ * 存储里的值大多是 JSON 字符串，纯文本扫描是扫不到 user.tid 的，
+ * 所以先把能解析的再挂成对象（key 加 #json 后缀，避免和原始字符串互相覆盖）。
+ */
+function storageToRecord(data) {
+  const merged = {}
+  const scopes = [
+    ['local', data?.local],
+    ['session', data?.session]
+  ]
+  for (const [scope, store] of scopes) {
+    if (!store || typeof store !== 'object') continue
+    for (const [key, raw] of Object.entries(store)) {
+      const full = `${scope}:${key}`
+      merged[full] = raw
+      const text = String(raw || '').trim()
+      if (!text || (text[0] !== '{' && text[0] !== '[')) continue
+      try {
+        merged[`${full}#json`] = JSON.parse(text)
+      } catch {
+        /* 不是合法 JSON 就只留原始字符串 */
+      }
+    }
+  }
+  if (data?.cookie) merged['@cookie'] = data.cookie
+
+  return {
+    id: `storage-${Date.now()}`,
+    at: new Date().toISOString(),
+    host: '__page_storage__',
+    method: 'STORE',
+    path: '/page-storage',
+    reqHeaders: {},
+    resHeaders: {},
+    reqBody: '',
+    resBody: JSON.stringify(merged)
+  }
+}
+
+/**
  * 「打开入口」的兜底动作（独立窗口）。
  *
  * 参数弹窗里现在直接把入口塞进内嵌 webview，这条路径只留给「就是想单独开个窗口看看」
@@ -489,8 +626,8 @@ async function openEntry(rule, cinema = {}) {
     }
 
     const userAgent = rule?.launch?.userAgent || MOBILE_UA
-    // 先把网络前置做好再 loadURL：代理晚一步，登录页那一跳就永久漏了
-    await prepareParamSession()
+    // 先把网络前置做好再 loadURL：sw.js 挡晚一步，首屏就被 ServiceWorker 接走了
+    await prepareCaptureSession(PARAM_PARTITION)
 
     if (paramFlowWindow && !paramFlowWindow.isDestroyed()) {
       paramFlowWindow.setTitle(`${cinema.name || rule?.name || ''} · 获取参数`)
@@ -817,11 +954,15 @@ app.whenReady().then(async () => {
   ctx.openEntry = openEntry
   /** 参数窗口/内嵌 webview 统一用手机 UA，否则这些 H5 会返回「请在微信中打开」 */
   ctx.mobileUA = MOBILE_UA
-  ctx.prepareParamSession = prepareParamSession
+  ctx.prepareCaptureSession = prepareCaptureSession
   ctx.resetParamSession = resetParamSession
   /** 内嵌页面旁听抓包（CDP Network），页面本身直连，不经过代理 */
   ctx.attachPageCapture = attachPageCapture
   ctx.detachPageCapture = detachPageCapture
+  ctx.findGuestPage = findGuestPage
+  ctx.readPageStorage = readPageStorage
+  ctx.storageToRecord = storageToRecord
+  ctx.cdpStats = cdpStats
   /** 抓包是持续过程，主进程边抓边把增量推给渲染进程，弹窗不用等 20 秒才知道有没有值 */
   ctx.sendToRenderer = (channel, payload) => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload)

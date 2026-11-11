@@ -233,6 +233,16 @@ routers.push(
     const entryUrl = String(cinema.accessUrl || '').trim()
     if (!entryUrl) return { ok: false, message: '该影城没有配置入口链接，无法打开' }
 
+    // 先把页面的 session 收拾干净（挡 sw.js + 清旧注册）再让渲染进程加载链接：
+    // 顺序反了，首屏请求就被 ServiceWorker 接管，响应体再也读不到
+    if (typeof ctx.prepareCaptureSession === 'function') {
+      try {
+        await ctx.prepareCaptureSession(PARAM_WEB_PARTITION)
+      } catch {
+        /* 收拾失败不影响打开页面 */
+      }
+    }
+
     return {
       ok: true,
       url: entryUrl,
@@ -379,14 +389,74 @@ routers.push(
       }
     }
 
+    /**
+     * 页面存储兜底。
+     *
+     * 凤凰（phoenix）这类系统的 tid / sid 只在登录成功那一次接口里出现，
+     * 之后值就常驻页面 localStorage（base.user.tid / base.user.sid），
+     * 运营登录完再点「获取参数」时流量里不会再出现它们 —— 只靠抓包永远等不到。
+     * 所以每一轮都去页面存储里捞一遍，优先级压到比抓包低（0.5），
+     * 有真实流量命中时仍然以流量为准。
+     */
+    let pageId = Number(params.webContentsId || 0) || 0
+    let pageAttached = false
+    let storageReads = 0
+    let storageState = '待挂载'
+
+    const scanStorage = async () => {
+      if (typeof ctx.findGuestPage !== 'function') return
+      if (!pageId) {
+        pageId = ctx.findGuestPage(entryHosts[0] || '')
+        if (!pageId) return
+      }
+      if (!pageAttached) {
+        pageAttached = true
+        try {
+          await ctx.attachPageCapture(pageId)
+        } catch {
+          /* 挂不上就只靠抓包 */
+        }
+      }
+      storageReads += 1
+      try {
+        const res = await ctx.readPageStorage(pageId)
+        if (!res.ok) {
+          storageState = res.message
+          return
+        }
+        storageState = `已读 ${storageReads} 次`
+        const record = ctx.storageToRecord(res.data)
+        const rest = keys.filter((key) => !strict.has(key) && (rank[key] || 0) < 2)
+        if (!rest.length) return
+        for (const [key, value] of Object.entries(pickValues(record, rest))) {
+          put(key, value, '页面存储', 0.5)
+        }
+      } catch (e) {
+        storageState = e.message
+      }
+    }
+
+    await scanStorage()
+    notify()
+
     // 后台字段清单里常混着「会员成本」「备注」这种根本不在流量里的字段，
-    // 以它们为准会让弹窗每次都干等满超时 —— 等待只盯规则声明过的可抓字段
+    // 以它们为准会让弹窗每次都干等满超时 —— 等待只盯「必填」和规则声明过的可抓字段
+    const requiredKeys = rows
+      .filter((row) => row && row.required === true)
+      .map((row) => String(row.key || ''))
+      .filter(Boolean)
     const declared = new Set(
       (activeRule.params || []).map((item) =>
         normalizeKey(typeof item === 'string' ? item : item?.key || '')
       )
     )
-    const blocking = declared.size ? keys.filter((key) => declared.has(normalizeKey(key))) : keys
+    // 优先级：显式必填 > 规则声明的可抓字段 > 全部
+    // （会员成本/备注这类是运营手填的，永远等不到，算进完成条件只会白等）
+    const blocking = requiredKeys.length
+      ? [...new Set(requiredKeys)]
+      : declared.size
+        ? keys.filter((key) => declared.has(normalizeKey(key)))
+        : keys
 
     // 登录要时间：默认给 2 分钟，最长 5 分钟；窗口被关掉立刻收工
     const waitMs = Math.min(Math.max(Number(params.waitMs) || 120000, 5000), 300000)
@@ -396,6 +466,7 @@ routers.push(
 
     // 收工原因要能说出来：「抓不到」和「你关了窗口」是两件事，混在一起没法排查
     let stopReason = 'timeout'
+    let loopIdx = 0
     while (Date.now() < deadline) {
       // 又点了一次「获取参数」或点了「停止」：这一轮让位，别抢流量
       if (seq !== paramCaptureSeq) {
@@ -413,6 +484,9 @@ routers.push(
       }
       await new Promise((resolve) => setTimeout(resolve, 700))
       scanNew()
+      // 存储里不会自己变，隔几轮读一次即可，别把页面卡住
+      loopIdx += 1
+      if (loopIdx % 3 === 0) await scanStorage()
       notify()
     }
 
@@ -422,6 +496,7 @@ routers.push(
       ...snapshot(),
       launch,
       proxyRunning: ctx.proxyRunning,
+      storage: { pageId, reads: storageReads, state: storageState },
       stopReason,
       timedOut: stopReason === 'timeout'
     }

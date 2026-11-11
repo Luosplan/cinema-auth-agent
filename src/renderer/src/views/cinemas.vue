@@ -367,6 +367,8 @@ async function captureParams() {
       cinema: payload,
       // 页面已经由 webview 打开，这里只抓不打开
       launch: false,
+      // 主进程也会自己找内嵌页，这里能拿到就顺手带上，省一次查找
+      webContentsId: paramWebContentsId || 0,
       // 登录要输账号、等验证码，给两分钟
       waitMs: 120000
     })
@@ -380,14 +382,22 @@ async function captureParams() {
     paramFrom.value = { ...paramFrom.value, ...(res.from || {}) }
 
     const got = Object.keys(paramValues.value).length
+    // 收工原因说清楚：抓齐了就报喜，没抓齐就说明还剩哪些要人工补
     if (!keys.length) {
-      ElMessage.info(res.message || '该程序没有声明抓包字段，入口已打开')
+      paramHint.value = res.message || '该程序没有声明抓包字段，入口已打开'
+      ElMessage.info(paramHint.value)
     } else if (!got) {
-      ElMessage.warning('这次没有抓到数据，请在上面的页面里完成一次登录')
+      paramHint.value = '这次没有抓到数据，请在上面的页面里完成一次登录'
+      ElMessage.warning(paramHint.value)
     } else if (res.missing?.length) {
-      ElMessage.warning(`已获取 ${got} 个参数，${res.missing.length} 个还没抓到`)
+      // 主进程只知道 key，弹窗里说的是 label（member_cost → 会员成本），翻译一下再给人看
+      const labelOf = (key) => rows.find((row) => row.key === key)?.label || key
+      const names = res.missing.map(labelOf).join('、')
+      paramHint.value = `已抓 ${got} 个，还有 ${res.missing.length} 个没抓到（${names}），可能需要人工填写`
+      ElMessage.warning(paramHint.value)
     } else {
-      ElMessage.success(`已获取 ${got} 个参数`)
+      paramHint.value = `已抓齐 ${got} 个参数`
+      ElMessage.success(paramHint.value)
     }
   } catch (e) {
     ElMessage.error(e.message || '获取失败')

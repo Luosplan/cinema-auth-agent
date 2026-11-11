@@ -4,23 +4,71 @@
  * CinemaGroup.captureConfig 里写的是手机上要填的字段名（mobile / tid / larkSid / _m_h5_tk…），
  * 这些值落点每家都不一样：有的在 cookie、有的在请求头、有的在 JSON 请求体、有的只在响应体里回显。
  * 所以不按固定路径取值，而是把整条记录翻一遍、按字段名对齐 —— 字段名本身就是契约。
+ *
+ * 名字对齐要宽容一点：接口里的大小写常常和后台写的不同（larkSid / larksid），
+ * 还有些字段在系统内部根本换了名字（后台要 larkSid，前端源码里叫 sid），
+ * 所以匹配走「小写 + 别名表」，而不是严格相等 —— 严格相等会让这类字段永远抓不到。
  */
+
+import { FIELD_ALIASES, normalizeKey } from './ParamResolver.js'
 
 const MAX_BODY_CHARS = 512 * 1024
 const MAX_DEPTH = 6
 
+/** 目标字段 → 实际可能出现的名字（全部小写），命中任一即算这个字段 */
+function buildMatcher(keys) {
+  const map = new Map()
+  for (const key of keys) {
+    const lower = String(key).toLowerCase()
+    map.set(lower, key)
+    const aliases = FIELD_ALIASES[normalizeKey(key)]
+    if (Array.isArray(aliases)) {
+      for (const alias of aliases) {
+        const a = String(alias).toLowerCase()
+        // 先到先得：多个字段共用同一个别名时，别让后加的字段把前面的挤掉
+        if (!map.has(a)) map.set(a, key)
+      }
+    }
+  }
+  return map
+}
+
+/**
+ * 值合理性校验：同一个名字在不同上下文里含义完全不同。
+ *
+ * 最典型的是手机号 —— 页面存储里埋点对象（APLUS_* 这类）也有个 `mobile` 字段，
+ * 值是 0。通用按名匹配会把 0 当成手机号，还把真正的 17762682464 覆盖掉。
+ * 抓到假值比抓不到更糟，所以同名但明显不像的，直接不要。
+ */
+const PLAUSIBLE = {
+  mobile: (v) => /^\+?\d{7,15}$/.test(String(v).replace(/[\s-]/g, '')),
+  phone: (v) => /^\+?\d{7,15}$/.test(String(v).replace(/[\s-]/g, '')),
+  larksid: (v) => String(v).length >= 8 && !/^\d{1,3}$/.test(String(v)),
+  tid: (v) => String(v).length >= 8
+}
+
+function plausible(key, text) {
+  const rule = PLAUSIBLE[normalizeKey(key)]
+  if (!rule) return true
+  return rule(text)
+}
+
 /** 一条记录里能对上多少个字段，就返回多少个 */
 export function pickValues(record, keys) {
-  const wanted = new Set((keys || []).filter(Boolean).map(String))
   const out = {}
-  if (!record || !wanted.size) return out
+  const wanted = (keys || []).filter(Boolean).map(String)
+  if (!record || !wanted.length) return out
+  const matcher = buildMatcher(wanted)
 
-  const put = (key, value) => {
-    if (!wanted.has(key) || value === undefined || value === null) return
+  const put = (name, value) => {
+    if (value === undefined || value === null) return
+    const target = matcher.get(String(name).toLowerCase())
+    if (!target) return
     const text = typeof value === 'object' ? safeStringify(value) : String(value).trim()
     if (!text) return
+    if (!plausible(target, text)) return
     // 记录按时间从旧到新遍历，后写的覆盖先写的，留下的就是最近一次看到的值
-    out[key] = text
+    out[target] = text
   }
 
   // 1. URL 查询串

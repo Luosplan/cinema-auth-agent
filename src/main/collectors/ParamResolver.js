@@ -43,7 +43,14 @@ export const FIELD_ALIASES = {
   k: ['k'],
   tenantid: ['tenantid', 'tenant_id'],
   nickname: ['nickname', 'nick_name', 'username', 'membername'],
-  memberid: ['memberid', 'member_id', 'userid', 'user_id', 'vipid']
+  memberid: ['memberid', 'member_id', 'userid', 'user_id', 'vipid'],
+  /**
+   * larkSid 是「云智/凤凰（phoenix）」系的会话 id。
+   * 前端源码里它就叫 sid（`t.larkSid = o.default.base.user.sid`），
+   * 只有绑卡、验证手机号那几个接口的请求体里才写成 larkSid ——
+   * 登录态本身藏在 localStorage 的 base.user.sid 里，所以别名必须带上 sid。
+   */
+  larksid: ['larksid', 'sid']
 }
 
 /** 鉴权类字段优先从请求头取，别在 JSON 里乱翻 */
