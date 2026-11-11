@@ -8,6 +8,8 @@
  * 接口路径和字段名上，用配置表达比用继承表达更省事，也更好让运营自己维护。
  */
 
+import { isBypassHost } from '../mitm/hostBypass.js'
+
 /**
  * @typedef {Object} CaptureRule
  * @property {string}  id            唯一标识
@@ -24,7 +26,20 @@ export default class Extractor {
   constructor(rules = []) {
     /** 「获取参数」时按影城入口链接临时放行的域名，不属于任何正式规则 */
     this.extraHosts = []
+    /**
+     * 全量解密开关：只有「小程序采集」这一条路会打开它。
+     *
+     * H5 采集有入口链接，域名能从链接推出来；小程序跑在微信里，我们既没有链接，
+     * 也不可能有二十多套系统的接口域名清单。既然配不全，就干脆全解开、靠字段名匹配捞值，
+     * 例外表见 mitm/hostBypass.js（微信自身、系统更新、杀毒、银行一律不断只透传）。
+     */
+    this.openCapture = false
     this.setRules(rules)
+  }
+
+  /** 开关必须显式关掉：留着它等于把客户机所有 HTTPS 长期解开 */
+  setOpenCapture(on) {
+    this.openCapture = Boolean(on)
   }
 
   setRules(rules) {
@@ -65,6 +80,9 @@ export default class Extractor {
     }
     if ((this.extraHosts || []).some((pattern) => matchDomain(pattern, host))) {
       return { id: '__entry__', name: '影城入口链接', hosts: this.extraHosts }
+    }
+    if (this.openCapture && !isBypassHost(host)) {
+      return { id: '__open__', name: '小程序全量解密', hosts: ['*'] }
     }
     return null
   }

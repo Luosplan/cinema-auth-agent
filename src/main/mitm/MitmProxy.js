@@ -29,6 +29,15 @@ export default class MitmProxy {
     this.onCapture = null
     this.onLog = null
     this.stats = { total: 0, intercepted: 0, tunneled: 0, failed: 0 }
+    /** 见过的域名 → 次数：只看不解密，用来排查「小程序到底打了哪些域名」 */
+    this.seenHosts = new Map()
+  }
+
+  /** 按命中次数排序的域名列表（多的在前） */
+  hostReport() {
+    return [...this.seenHosts.entries()]
+      .map(([host, count]) => ({ host, count }))
+      .sort((a, b) => b.count - a.count)
   }
 
   start(preferredPort = 9090) {
@@ -93,6 +102,15 @@ export default class MitmProxy {
   handleConnect(req, clientSocket, head) {
     const { host, port } = splitHostPort(req.url)
     this.stats.total++
+
+    /**
+     * 记下所有经过代理的域名，包括我们选择不解密的那些。
+     *
+     * 小程序没有 H5 链接，抓包域名全靠规则提前配；配漏了的表现是「代理在跑、参数一个不来」，
+     * 光看统计只知道隧道命中，不知道是哪些域名在跑。把 CONNECT 的 host 记下来，
+     * 运营跑一遍就能看到「小程序到底打了哪些域名」，直接补进规则即可。
+     */
+    this.seenHosts.set(host, (this.seenHosts.get(host) || 0) + 1)
 
     if (!this.shouldIntercept(host)) {
       this.stats.tunneled++
@@ -237,8 +255,19 @@ export default class MitmProxy {
       clientRes.end('upstream error')
     })
 
-    if (reqChunks.length) upstreamReq.write(Buffer.concat(reqChunks))
-    upstreamReq.end()
+    /**
+     * 请求体必须「边收边转」。
+     *
+     * 这里原来是 `if (reqChunks.length) upstreamReq.write(...); upstreamReq.end()`，
+     * 但这两行在 createRequest 之后同步执行，此时客户端 body 还没到达（data 事件在后续
+     * 事件循环里才触发），等于**把所有 POST/PUT 的 body 全丢了**：
+     * 上游收到 `content-length: N` 却等不到 body，只能超时或报错 ——
+     * 小程序那边表现就是接口全挂、整页白屏。
+     *
+     * 改成 pipe 之后 body 原样流过去，下面的 data 监听只负责旁路留档，不影响转发。
+     */
+    clientReq.pipe(upstreamReq)
+    clientReq.on('aborted', () => upstreamReq.destroy())
   }
 
   emitCapture(record) {

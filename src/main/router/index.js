@@ -6,6 +6,8 @@ import fs from 'node:fs'
 import { mergeRules } from '../collectors/rules/index.js'
 import { paramDef, resolveForKeys, normalizeKey, describeParams } from '../collectors/ParamResolver.js'
 import { pickValues } from '../collectors/ParamCollector.js'
+import { isBypassHost } from '../mitm/hostBypass.js'
+import { parseAppid, appletUrl } from '../wx/WxUi'
 
 const exec = promisify(execFile)
 const PS = ['-NoProfile', '-NonInteractive', '-Command']
@@ -107,11 +109,43 @@ routers.push(
   new EventRoute('cinemas:entry:open', 'invoke', async (api, data) => {
     const params = data.params || {}
     const rule = api.ctx.extractor.activeRules.find((r) => r.id === String(params.systemCode || ''))
-    if (!rule) {
-      return { ok: false, message: `系统「${params.systemCode || '未知'}」没有抓包规则，无法打开` }
+    const cinema = params.cinema || {}
+    try {
+      const launch = api.ctx.openEntry(rule || { id: params.systemCode, launch: {} }, cinema)
+      /**
+       * 小程序统一走 appid 直达（weixin://launchapplet/?app_id=）。
+       * appid 优先取影城自己配的，其次取规则里写死的。
+       */
+      if (launch?.needsMiniappLaunch) {
+        const appid = params.appid || launch.appid || rule?.launch?.appid || ''
+        const name = launch.name || rule?.launch?.name || rule?.name || cinema.name || ''
+        const res = await api.ctx.launchMiniapp(appid, name)
+        return { ...launch, ...res, appid, name }
+      }
+      return launch
+    } catch (e) {
+      return { ok: false, message: e.message }
+    }
+  })
+)
+
+/**
+ * 「用搜索打开」：scheme 指望不上时的兜底。
+ *
+ * `launchapplet` 只对「添加到电脑桌面」过的小程序生效，未登记时微信静默丢弃，
+ * 而影城上百家又不可能每家都去登记。这里改成界面自动化：把名字填进微信搜索框、
+ * 回车进第一个结果 —— 操作员手工也是这么干的，只是交给我们按键。
+ */
+routers.push(
+  new EventRoute('cinemas:miniapp:search-open', 'invoke', async (api, data) => {
+    const params = data.params || {}
+    const name = String(params.name || params.cinema?.name || '').trim()
+    if (!name) return { ok: false, message: '缺少小程序名，无法搜索' }
+    if (typeof api.ctx.launchBySearch !== 'function') {
+      return { ok: false, message: '当前版本不支持搜索打开' }
     }
     try {
-      return api.ctx.openEntry(rule, params.cinema || {})
+      return await api.ctx.launchBySearch(name)
     } catch (e) {
       return { ok: false, message: e.message }
     }
@@ -187,12 +221,15 @@ routers.push(
  * 同时把主域通配带上 —— 页面在 a.xxx.com，真正的登录接口常常在 b.xxx.com。
  */
 export function hostsForEntryUrl(url) {
-  let host = ''
+  let parsed = null
   try {
-    host = new URL(String(url)).hostname.toLowerCase()
+    parsed = new URL(String(url))
   } catch {
     return []
   }
+  // weixin:// 之类不是网页，没有「要解密的域名」这回事
+  if (!/^https?:$/i.test(parsed.protocol)) return []
+  const host = parsed.hostname.toLowerCase()
   if (!host) return []
 
   const parts = host.split('.')
@@ -229,8 +266,90 @@ export function hostsForEntryUrl(url) {
 routers.push(
   new EventRoute('cinemas:prepare-params', 'invoke', async (api, data) => {
     const { ctx } = api
-    const cinema = (data.params || {}).cinema || {}
+    const params = data.params || {}
+    const cinema = params.cinema || {}
+    const systemCode = String(params.systemCode || cinema.systemCode || '')
     const entryUrl = String(cinema.accessUrl || '').trim()
+    const rule = ctx.extractor.activeRules.find((r) => r.id === systemCode) || null
+    // 入口写的是 launchapplet 链接时，链接里的 appid 就是最准的那份（直接从桌面快捷方式复制的）
+    const appid = String(parseAppid(entryUrl) || cinema.accessAppId || rule?.launch?.appid || '').trim()
+    const accessType = String(cinema.accessType || '').toLowerCase()
+
+    /**
+     * 小程序分支：没有 H5 链接，只能让真实微信去跑真实小程序。
+     *
+     * 和 H5 完全不是一件事 —— H5 是我们自己开页面、自己旁听；
+     * 小程序跑在微信进程里，我们插不进去（wx.login 的 code 只能由微信客户端生成），
+     * 唯一能做的是：① 把系统代理指向本机 ② 放行规则里的域名 ③ 尽力把微信拉起来。
+     */
+    /**
+     * 入口里能认出 appid 的（`weixin://launchapplet/?app_id=wx...` 或直接写 appid），
+     * 一律按小程序处理。
+     *
+     * 这条不能再交给 `!entryUrl` 判断：现场把「入口」直接填成那条 scheme 链接，
+     * 结果被判成 H5、塞进 <webview> 加载 `weixin://`，右侧只剩一块白屏、小程序压根没起。
+     * 那种链接只有交给 ShellExecute 才有意义。
+     */
+    const appidFromEntry = parseAppid(entryUrl)
+    const weixinEntry = Boolean(appidFromEntry) || /^weixin:/i.test(entryUrl)
+    const isMiniapp =
+      weixinEntry ||
+      (!entryUrl && (accessType === 'miniapp' || rule?.launch?.type === 'miniapp' || !!appid))
+    if (isMiniapp) {
+      /**
+       * 域名不是前置条件，只是加分项。
+       *
+       * 原来这里要求「必须找到规则、规则必须有 hosts」，结果是二十多套系统里
+       * 只有四套配了规则，其余全部门都进不去。小程序这条路本来就不该依赖域名清单：
+       * 打开全量解密，靠字段名匹配捞值，规则里的 hosts 有就顺带放行（少解一点是一点）。
+       */
+      const ruleHosts = (rule?.hosts || []).filter(Boolean)
+      const hosts = ruleHosts
+
+      let proxy = { running: false }
+      try {
+        // 只有本来没跑的时候才记「是我们起的」，停采集时才能放心还原系统代理
+        ctx.paramProxyAuto = !ctx.proxyRunning
+        proxy = await ctx.startProxy()
+      } catch (e) {
+        return { ok: false, message: `启动抓包代理失败：${e.message}` }
+      }
+      ctx.extractor.setOpenCapture(true)
+      if (ruleHosts.length) ctx.extractor.allowHosts(ruleHosts)
+
+      // 唤起微信。PC 上唯一可用的形式是 appid 版 launchapplet 链接（见 wx/WxUi.js）
+      const miniappName = rule?.launch?.name || rule?.name || cinema.name || ''
+      let launch = null
+      try {
+        const opened = await ctx.openEntry(rule, cinema)
+        if (opened?.needsMiniappLaunch) {
+          const useAppid = appid || opened.appid || rule?.launch?.appid || ''
+          const res = await ctx.launchMiniapp(useAppid, miniappName)
+          launch = { ...opened, ...res, appid: useAppid, name: miniappName }
+        } else {
+          launch = opened
+        }
+      } catch (e) {
+        launch = { ok: false, message: e.message }
+      }
+
+      return {
+        ok: true,
+        mode: 'miniapp',
+        appid,
+        hosts,
+        ruleHosts,
+        /** 全量解密：界面上要说清楚「客户机流量这一轮都经过本机」 */
+        openCapture: true,
+        /** 小程序唯一可用的直达链接（微信「添加到桌面」用的那条）；appid 不合法时给空串，界面显示「—」 */
+        scheme: appletUrl(appid),
+        miniappName: rule?.launch?.name || rule?.name || cinema.name || '',
+        proxyRunning: Boolean(proxy.running),
+        proxyPort: proxy.port,
+        launch
+      }
+    }
+
     if (!entryUrl) return { ok: false, message: '该影城没有配置入口链接，无法打开' }
 
     // 先把页面的 session 收拾干净（挡 sw.js + 清旧注册）再让渲染进程加载链接：
@@ -245,6 +364,7 @@ routers.push(
 
     return {
       ok: true,
+      mode: 'h5',
       url: entryUrl,
       hosts: hostsForEntryUrl(entryUrl),
       partition: PARAM_WEB_PARTITION,
@@ -266,8 +386,24 @@ routers.push(
     // 规则只是加分项：有就用精确路径，没有也不挡路 —— 抓包靠的是链接
     const rule = ctx.extractor.activeRules.find((r) => r.id === systemCode) || null
     const entryHosts = entryUrl ? hostsForEntryUrl(entryUrl) : []
+    const accessType = String(cinema.accessType || '').toLowerCase()
+    /**
+     * 小程序判定必须放在「没有链接就退出」之前。
+     *
+     * 小程序本来就既没有 accessUrl 也不一定有规则（二十多套系统里只有四套配了规则），
+     * 先判链接会把绝大多数小程序影城直接挡在门外 —— 表现为点了「获取参数」立刻弹红条
+     * 「该影城没有配置入口链接」，而这时候代理其实已经起好了。
+     *
+     * 入口填成 `weixin://launchapplet/?app_id=...` 的也算小程序（见 prepare-params 里的说明）。
+     */
+    const appidFromEntry = parseAppid(entryUrl)
+    const isMiniapp =
+      Boolean(appidFromEntry) ||
+      /^weixin:/i.test(entryUrl) ||
+      (!entryUrl &&
+        (accessType === 'miniapp' || rule?.launch?.type === 'miniapp' || !!cinema.accessAppId))
 
-    if (!entryUrl && !rule) {
+    if (!entryUrl && !rule && !isMiniapp) {
       return { ok: false, message: '该影城没有配置入口链接，无法确定要打开哪个页面' }
     }
 
@@ -283,28 +419,58 @@ routers.push(
     }
 
     // 本次采集用的「有效规则」：有正式规则就用它，没有就按入口链接临时造一条
-    const activeRule =
-      rule || {
-        id: systemCode || '__entry__',
-        name: cinema.name || '影城入口链接',
-        enabled: true,
-        hosts: entryHosts,
-        params: keys.map((key) => ({ key })),
-        launch: entryUrl ? { type: 'h5', url: entryUrl } : null
-      }
+    const activeRule = rule || {
+      id: systemCode || '__entry__',
+      name: cinema.name || '影城入口链接',
+      enabled: true,
+      hosts: entryHosts,
+      params: keys.map((key) => ({ key })),
+      launch: entryUrl ? { type: 'h5', url: entryUrl } : { type: 'miniapp' }
+    }
 
     const seq = ++paramCaptureSeq
 
-    // 页面由弹窗里的 <webview> 自己加载（直连），这里不再起代理：
+    /**
+     * 小程序模式：没有页面可旁听，只能靠代理截微信的网络栈。
+     *
+     * prepare-params 那一步已经起过代理了，这里再兜一次（幂等）：
+     * 渲染进程有可能跳过 prepare 直接点采集，代理没跑就等于白抓。
+     */
+    if (isMiniapp) {
+      try {
+        if (!ctx.proxyRunning) {
+          ctx.paramProxyAuto = true
+          await ctx.startProxy()
+        }
+        // 全量解密：小程序没有入口链接，也没有域名清单，只能全解开靠字段名捞
+        ctx.extractor.setOpenCapture(true)
+        if (rule?.hosts?.length) ctx.extractor.allowHosts(rule.hosts)
+      } catch (e) {
+        return { ok: false, message: `启动抓包代理失败：${e.message}` }
+      }
+    }
+
+    // 页面由弹窗里的 <webview> 自己加载（直连），H5 模式不再起代理：
     // 这批 H5 一旦套代理就渲染不出来，抓包改由 CDP 旁听响应体。
     let launch = null
     if (params.launch !== false && typeof ctx.openEntry === 'function') {
       try {
         launch = await ctx.openEntry(activeRule, cinema)
+        // 小程序没有可打开的链接，只能按 appid 走 launchapplet（见 wx/WxUi.js）
+        if (launch?.needsMiniappLaunch) {
+          const res = await ctx.launchMiniapp(
+            launch.appid || appidFromEntry || rule?.launch?.appid || '',
+            launch.name || ''
+          )
+          launch = { ...launch, ...res }
+        }
       } catch (e) {
         launch = { ok: false, message: `打开入口失败：${e.message}` }
       }
     }
+
+    // 小程序侧没有内嵌页可读，页面存储兜底这条路直接关掉
+    if (isMiniapp) launch = launch || { ok: true, mode: 'miniapp' }
 
     const values = {}
     // key → 取值来源（响应体 data.baseTypeRes / 请求头 / 按名匹配…），弹窗里标在值后面
@@ -324,11 +490,19 @@ routers.push(
     // 按名匹配会稳定抓到它，抓到假值比抓不到更糟
     const strict = new Set(keys.filter((key) => (paramDef(activeRule, key).deny || []).length))
 
-    // 只回扫最近 200 条：更早的基本是别的系统，翻全量没意义还慢
-    let scanned = Math.max(0, ctx.captures.length - 200)
+    /**
+     * 增量扫描要靠记录自己的 `_seq`，不能用数组下标。
+     *
+     * ctx.captures 到上限会从头部裁剪，长度不变、下标整体前移。用「数组长度」当进度
+     * 的话，裁剪一开始进度就永远追不上，表现为「代理明明在解包，弹窗一个值都不来」——
+     * 小程序全量解密时几秒就填满缓冲，这个坑必踩。
+     */
+    let lastSeq = ctx.captures.length
+      ? ctx.captures[ctx.captures.length - 1]._seq || 0
+      : 0
 
     /**
-     * 域名判定：正式规则的域名，或者入口链接自己的域名，都算「这一轮该看的」。
+     * 域名判定：全量解密时除了例外表都算，否则只认「正式规则域名 + 入口链接域名」。
      *
      * 为什么还要带上入口域名：影城的入口链接域名和各系统规则里写死的域名经常不一致
      * （同一个出票系统，几十家影城各挂在自己的 H5 域名下），只认规则会把这一轮的
@@ -337,12 +511,17 @@ routers.push(
     const entryRule = { hosts: entryHosts }
     const inScope = (host) =>
       ctx.extractor.hostMatches(activeRule, host) ||
-      (entryHosts.length ? ctx.extractor.hostMatches(entryRule, host) : false)
+      (entryHosts.length ? ctx.extractor.hostMatches(entryRule, host) : false) ||
+      // 全量解密模式：任何被解开的域名都算本轮可见范围（例外表里的根本不会进来）
+      (ctx.extractor.openCapture && !isBypassHost(host))
 
     const scanNew = () => {
       const list = ctx.captures
-      if (list.length < scanned) scanned = 0 // 缓冲被截断过，从头再扫
-      for (let i = scanned; i < list.length; i += 1) {
+      if (!list.length) return
+      // 从尾部往前找第一条还没扫过的记录，作为本轮起点，再正序处理（后写覆盖先写）
+      let start = list.length
+      while (start > 0 && (list[start - 1]._seq || 0) > lastSeq) start -= 1
+      for (let i = start; i < list.length; i += 1) {
         const record = list[i]
         if (!inScope(record.host)) continue
 
@@ -357,7 +536,7 @@ routers.push(
           }
         }
       }
-      scanned = list.length
+      lastSeq = list[list.length - 1]._seq || lastSeq
     }
 
     const snapshot = () => ({
@@ -377,6 +556,7 @@ routers.push(
 
     // 一个字段都没有：窗口已经开着了，让操作员自己登录看页面，不占用等待时间
     if (!keys.length) {
+      if (isMiniapp && seq === paramCaptureSeq) ctx.extractor.setOpenCapture(false)
       return {
         ok: true,
         rows,
@@ -437,7 +617,7 @@ routers.push(
       }
     }
 
-    await scanStorage()
+    if (!isMiniapp) await scanStorage()
     notify()
 
     // 后台字段清单里常混着「会员成本」「备注」这种根本不在流量里的字段，
@@ -485,19 +665,46 @@ routers.push(
       }
       await new Promise((resolve) => setTimeout(resolve, 700))
       scanNew()
-      // 还没成功读过一次就每轮都试（点下去那一刻内嵌页可能还没创建）；
-      // 读过之后存储不会自己变，隔几轮再读即可
-      loopIdx += 1
-      if (!storageReads || loopIdx % 3 === 0) await scanStorage()
+      // 小程序没有内嵌页可读，跳过存储通道；
+      // 读过之后存储不会自己变，隔几轮再读即可（没读成功时每轮都试）
+      if (!isMiniapp) {
+        loopIdx += 1
+        if (!storageReads || loopIdx % 3 === 0) await scanStorage()
+      }
       notify()
     }
+
+    // 采集窗口结束就把全量解密收回：系统代理可以继续挂着，但没必要再解包了。
+    // 只收回「自己这一轮」的开关 —— 被新一次「获取参数」顶掉时（superseded），
+    // 收工的这一轮不能把下一轮刚打开的全量解密关掉，否则新轮白跑。
+    if (isMiniapp && seq === paramCaptureSeq) ctx.extractor.setOpenCapture(false)
+
+    /**
+     * 这一轮实际解开了哪些域名。
+     *
+     * 小程序全量解密是「先能抓、再收窄」的路子：运营跑一遍，这里列出来的就是
+     * 这套系统真正在用的接口域名。下一次要么补进规则走白名单，要么留着当诊断依据 ——
+     * 没有这份清单，「代理在跑但参数不来」永远查不出是哪个域名没解。
+     */
+    const hitHosts = isMiniapp
+      ? [...new Set(ctx.captures.filter((item) => inScope(item.host)).map((item) => item.host))]
+          .slice(-20)
+          .map((host) => ({
+            host,
+            count: ctx.captures.filter((item) => item.host === host).length
+          }))
+          .sort((a, b) => b.count - a.count)
+      : []
 
     return {
       ok: true,
       rows,
       ...snapshot(),
       launch,
+      mode: isMiniapp ? 'miniapp' : 'h5',
       proxyRunning: ctx.proxyRunning,
+      openCapture: false,
+      capturedHosts: hitHosts,
       storage: { pageId, reads: storageReads, state: storageState },
       stopReason,
       timedOut: stopReason === 'timeout'
@@ -506,9 +713,25 @@ routers.push(
 )
 
 routers.push(
-  new EventRoute('cinemas:capture-params:stop', 'invoke', async () => {
+  new EventRoute('cinemas:capture-params:stop', 'invoke', async (api) => {
+    const { ctx } = api
     // 序号 +1：正在跑的那一轮下一跳自己 break，已结束的调用不受影响
     paramCaptureSeq += 1
+    /**
+     * 小程序采集会把系统代理指到本机。既然是「停止」，就得把代理一起收掉，
+     * 否则客户机整机流量一直绕本机跑 —— 关掉采集却忘了还原，是最难排查的故障。
+     * 只收「这次采集自己起的」那一个，用户本来就在跑的采集不动。
+     */
+    if (ctx.paramProxyAuto) {
+      ctx.paramProxyAuto = false
+      try {
+        await ctx.stopProxy()
+      } catch {
+        /* 还原失败不阻断停止流程 */
+      }
+    }
+    // 代理是用户手动开着的话不会走到上面，但全量解密同样必须收回
+    ctx.extractor.setOpenCapture(false)
     return { ok: true }
   })
 )
@@ -541,6 +764,12 @@ routers.push(
       running: ctx.proxyRunning,
       port: ctx.proxy.port,
       stats: ctx.proxy.stats,
+      // 见过的域名（含未解密的隧道）：小程序抓不到时先看这里，
+      // 能直接看出「微信到底有没有走代理」「要解密的域名配漏了哪个」
+      hosts: typeof ctx.proxy.hostReport === 'function' ? ctx.proxy.hostReport().slice(0, 40) : [],
+      /** 全量解密是否开着：开着的这段时间客户机所有 HTTPS 都经过本机 */
+      openCapture: Boolean(ctx.extractor.openCapture),
+      captured: ctx.captures.length,
       systemProxy: sysProxy,
       platform: process.platform
     }

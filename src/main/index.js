@@ -21,6 +21,8 @@ import routers from './router/index'
 import CertificateAuthority from './mitm/CertificateAuthority'
 import MitmProxy from './mitm/MitmProxy'
 import SystemProxy from './mitm/SystemProxy'
+import { addBypassHosts } from './mitm/hostBypass'
+import { launchMiniapp, launchBySearch, parseAppid } from './wx/WxUi'
 import Extractor from './collectors/Extractor'
 import { mergeRules } from './collectors/rules'
 import ConfigStore from './store/ConfigStore'
@@ -30,6 +32,11 @@ import MemberAuth from './auth/MemberAuth'
 
 const APP_TITLE = '影票授权助手'
 const MAX_CAPTURES = 300
+/**
+ * 小程序全量解密时缓冲要放大：整套 TLS 全解，几百条请求十几秒就填满，
+ * 而参数恰好出现在「填满之后」是常态 —— 缓冲太小会把登录那一枪挤掉。
+ */
+const MAX_CAPTURES_OPEN = 1500
 const MAX_LOGS = 500
 
 let mainWindow = null
@@ -39,6 +46,8 @@ let shutdownPending = false
 let shutdownDone = false
 let captureFlushTimer = null
 let paramFlowWindow = null
+/** 抓包记录序号，见 handleCapture */
+let captureSeq = 0
 
 /**
  * 参数窗口用手机 UA 打开：这些页面大多只在手机上看过，桌面 UA 会拿到
@@ -602,20 +611,21 @@ async function openEntry(rule, cinema = {}) {
   const accessType = String(cinema.accessType || '').toLowerCase()
   const ruleUrl = String(rule?.launch?.url || '').trim()
   const url = accessUrl || ruleUrl
-  const appid = String(cinema.accessAppId || rule?.launch?.appid || '').trim()
+  // 入口直接写成 launchapplet 链接时，链接里的 appid 比后台字段更可信
+  const appid = String(parseAppid(url) || cinema.accessAppId || rule?.launch?.appid || '').trim()
 
   // 有 H5 地址就开窗，不管 accessType 写的是什么：能进页面才有流量
   if (url) {
-    // 小程序入口常常填的是 weixin:// 链接（scheme 码 / 短链），这类只能交给系统打开，
-    // 塞进 BrowserWindow 会直接 ERR_UNKNOWN_URL_SCHEME
+    /**
+     * weixin:// 链接不交给系统打开、也不塞进 webview。
+     *
+     * 塞 webview 就是一块白屏（浏览器内核不认识这个 scheme）；
+     * 早先交给系统打开时微信又把它当普通网址丢进内置浏览器，停在「对不起，当前页面无法访问」。
+     * 这条链接唯一正确的用法是交给 launchMiniapp 走 ShellExecute，由调用方执行。
+     */
     if (/^weixin:\/\//i.test(url) || /^wx[a-z0-9]{16}$/i.test(url)) {
-      shell.openExternal(url).catch(() => {})
-      return {
-        ok: true,
-        mode: 'miniapp',
-        url,
-        hint: `已用微信打开 ${cinema.name || rule?.name || ''} 的小程序入口；若没反应，请在电脑版微信里手动打开，流量同样经过本机代理`
-      }
+      const name = rule?.launch?.name || rule?.name || cinema.name || '该小程序'
+      return { ok: false, mode: 'miniapp', needsMiniappLaunch: true, url, appid, name }
     }
 
     try {
@@ -671,16 +681,22 @@ async function openEntry(rule, cinema = {}) {
 
   if (accessType === 'miniapp' || rule?.launch?.type === 'miniapp') {
     const name = rule?.launch?.name || rule?.name || cinema.name || '该小程序'
-    const scheme = rule?.launch?.scheme || (appid ? `weixin://dl/business/?appid=${appid}` : '')
-    if (scheme) {
-      shell.openExternal(scheme).catch(() => {})
-      return {
-        ok: true,
-        mode: 'miniapp',
-        hint: `小程序没法用链接直达。已尝试唤起微信《${name}》；若停在「当前页面无法访问」，请在电脑版微信里手动打开该小程序并登录，流量同样会经过本机代理`
-      }
+    /**
+     * 这里曾经拼 `weixin://dl/business/?appid=` 交给系统打开，结果是
+     * 微信把它当普通网址丢进内置浏览器、页面报「对不起，当前页面无法访问」。
+     * 那条路要求小程序管理员在自己的后台开「明文 Scheme」，我们这些影城开不了。
+     * 现在统一交给 launchMiniapp 用 `launchapplet` 那条链接，由调用方决定要不要执行。
+     */
+    return {
+      ok: false,
+      mode: 'miniapp',
+      needsMiniappLaunch: true,
+      appid,
+      name,
+      message: appid
+        ? `已准备用 appid 直达《${name}》`
+        : `《${name}》还没有 appid：后台填好 accessAppId 才能一键直达`
     }
-    return { ok: false, message: `这套系统只有小程序入口，请在微信里打开《${name}》并登录` }
   }
 
   return { ok: false, message: '这套系统没有配置 H5 入口，也拿不到小程序 appid' }
@@ -714,6 +730,8 @@ async function stopProxy() {
   await ctx.proxy.stop()
   // 采集停了，按入口链接临时放行的域名一并收回，别让代理一直解密这些站点
   ctx.extractor.clearExtraHosts()
+  // 全量解密是采集期特权，停代理必须一起关掉，否则客户机所有 HTTPS 长期被解开
+  ctx.extractor.setOpenCapture(false)
   await resetParamSession()
   clearLock()
   log('info', '采集已停止，系统代理已还原')
@@ -790,6 +808,9 @@ function syncRestoreProxy() {
  * 原始记录节流批量推送，否则高频请求会把渲染进程打满。
  */
 function handleCapture(record) {
+  // 单调递增序号：ctx.captures 到上限会从头裁剪，光靠数组下标判断「哪些是新的」
+  // 在裁剪后必然错位（丢记录或重复扫），小程序全量解密时裁得尤其快
+  record._seq = ++captureSeq
   ctx.pendingCaptures.push(record)
   if (ctx.pendingCaptures.length > 50) ctx.pendingCaptures.shift()
 
@@ -799,8 +820,9 @@ function handleCapture(record) {
       const batch = ctx.pendingCaptures.splice(0, ctx.pendingCaptures.length)
       if (!batch.length) return
       ctx.captures.push(...batch)
-      if (ctx.captures.length > MAX_CAPTURES) {
-        ctx.captures.splice(0, ctx.captures.length - MAX_CAPTURES)
+      const limit = ctx.extractor?.openCapture ? MAX_CAPTURES_OPEN : MAX_CAPTURES
+      if (ctx.captures.length > limit) {
+        ctx.captures.splice(0, ctx.captures.length - limit)
       }
       broadcast('capture-batch', batch)
     }, 400)
@@ -941,6 +963,16 @@ app.whenReady().then(async () => {
   })
   ctx.auth.load()
 
+  /**
+   * 自己的服务端不能解：全量解密时本进程的请求也会绕进代理，
+   * 而主进程 fetch 走 Node 证书库、不认 Windows 根存储，解了等于把接口打断。
+   */
+  try {
+    addBypassHosts([new URL(ctx.auth.baseUrl).hostname])
+  } catch {
+    /* 地址异常不影响启动，最坏情况是采集期间会员端接口报错 */
+  }
+
   ctx.proxy = new MitmProxy({
     ca: ctx.ca,
     matchHost: (host) => ctx.extractor.matchHost(host)
@@ -952,6 +984,13 @@ app.whenReady().then(async () => {
   ctx.startProxy = startProxy
   ctx.stopProxy = stopProxy
   ctx.openEntry = openEntry
+  /**
+   * 小程序唯一的启动方式：weixin://launchapplet/?app_id=（微信「添加到桌面」用的那条链接）。
+   * 直开的前提是该小程序被「添加到电脑桌面」过一次，细节见 wx/WxUi.js 的注释。
+   */
+  ctx.launchMiniapp = launchMiniapp
+  /** scheme 的兜底：靠微信搜索框进小程序，绕过「添加到电脑桌面」的登记要求 */
+  ctx.launchBySearch = launchBySearch
   /** 参数窗口/内嵌 webview 统一用手机 UA，否则这些 H5 会返回「请在微信中打开」 */
   ctx.mobileUA = MOBILE_UA
   ctx.prepareCaptureSession = prepareCaptureSession
@@ -960,6 +999,8 @@ app.whenReady().then(async () => {
   ctx.attachPageCapture = attachPageCapture
   ctx.detachPageCapture = detachPageCapture
   ctx.findGuestPage = findGuestPage
+  /** 小程序采集时系统代理是不是我们起的：只有我们自己起的才在停止时还原 */
+  ctx.paramProxyAuto = false
   ctx.readPageStorage = readPageStorage
   ctx.storageToRecord = storageToRecord
   ctx.cdpStats = cdpStats

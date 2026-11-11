@@ -181,6 +181,32 @@ async function openParam(cinema) {
   paramHint.value = ''
   paramPageUrl.value = ''
   paramPageError.value = ''
+  /**
+   * 先按后台配置猜一下是哪种模式，否则弹窗要等到点「获取参数」才换宽度：
+   * 小程序的判定和主进程保持一致 —— 入口里能认出 appid、或没有入口链接但有 accessAppId。
+   */
+  const entry = String(cinema.accessUrl || '').trim()
+  const appidInEntry = /(?:app_?id=)(wx[0-9a-f]{16})/i.exec(entry)
+  const looksMiniapp =
+    /^weixin:/i.test(entry) ||
+    /^wx[0-9a-f]{16}$/i.test(entry) ||
+    Boolean(appidInEntry) ||
+    (!entry &&
+      (String(cinema.accessType || '').toLowerCase() === 'miniapp' || !!cinema.accessAppId))
+  paramMode.value = looksMiniapp ? 'miniapp' : 'h5'
+  miniappInfo.value = looksMiniapp
+    ? {
+        name: cinema.name,
+        appid: cinema.accessAppId || appidInEntry?.[1] || '',
+        scheme: '',
+        hosts: [],
+        ruleHosts: [],
+        openCapture: false,
+        capturedHosts: [],
+        proxyRunning: false,
+        launch: null
+      }
+    : null
   liveRows.value = []
   paramDialog.value = true
 }
@@ -259,6 +285,15 @@ const dialogEntry = computed(() => {
   return { text: '后台没有配置入口链接', ok: false }
 })
 
+/** 既没有入口链接也没有 appid：无从打开入口，禁用「获取参数」 */
+const canCapture = computed(() => {
+  const cinema = dialogCinema.value
+  if (!cinema) return false
+  return Boolean(
+    String(cinema.accessUrl || '').trim() || String(cinema.accessAppId || '').trim()
+  )
+})
+
 /** 抓包拿到的值，key → value；打开弹窗时清空，点「获取参数」才填 */
 const paramValues = ref({})
 /**
@@ -289,10 +324,23 @@ const capturedCount = computed(
   () => Object.keys(paramValues.value).filter((key) => paramValues.value[key]).length
 )
 
+/**
+ * appid 格式不对：最常见的错法是抄少了几位（微信不校验，只会静默丢弃）。
+ * 必须在卡片上标出来，否则操作员会以为「填了就应该能开」。
+ */
+const miniappAppidInvalid = computed(() => {
+  const id = String(miniappInfo.value?.appid || '').trim()
+  return Boolean(id) && !/^wx[0-9a-f]{16}$/i.test(id)
+})
+
 /** 弹窗里嵌入的入口页面地址：就是这家影城自己的 accessUrl，不是系统域名 */
 const paramPageUrl = ref('')
 const paramPageError = ref('')
 const paramPageUA = ref('')
+/** 'h5' 在自己开的页面里旁听；'miniapp' 只能靠代理截微信的流量 */
+const paramMode = ref('h5')
+/** 小程序采集时右侧要显示的信息（叫什么、解密哪些域名、代理是否在跑） */
+const miniappInfo = ref(null)
 /** 内嵌页面用的 session 分区：登录态留着，同一家影城下次打开不用重登 */
 const paramPartition = ref('persist:param-web')
 const paramWebview = ref(null)
@@ -355,22 +403,57 @@ async function captureParams() {
   paramHint.value = '正在启动采集并打开入口…'
   paramPageError.value = ''
 
-  // 1) 先把代理和解密白名单备好，再把页面塞进 webview —— 顺序反了，首跳流量就漏了
+  // 1) 前置：H5 是收拾 session，小程序是起代理 —— 顺序反了，首跳流量就漏了
   try {
-    const prep = await invoke('cinemas:prepare-params', { cinema: payload })
+    const prep = await invoke('cinemas:prepare-params', {
+      cinema: payload,
+      systemCode: cinema.systemCode || ''
+    })
     if (!prep?.ok) {
       ElMessage.error(prep?.message || '打开入口失败')
       capturing.value = false
       paramHint.value = ''
       return
     }
-    // 同一个地址再点一次也要真的重新加载（页面可能已经跳到别处）
-    paramPageUrl.value = ''
-    await nextTick()
-    paramPageUA.value = prep.userAgent || ''
-    paramPartition.value = prep.partition || 'persist:param-web'
-    paramPageUrl.value = prep.url
-    paramHint.value = '页面已打开：在里面登录一次，抓到的值会自动回填'
+
+    paramMode.value = prep.mode === 'miniapp' ? 'miniapp' : 'h5'
+    if (paramMode.value === 'miniapp') {
+      /**
+       * 小程序没有可嵌的页面：wx.login 的 code 只能由微信客户端生成，
+       * 我们插不进微信进程，只能让它跑自己的小程序，靠代理截流量。
+       */
+      miniappInfo.value = {
+        name: prep.miniappName || cinema.name || '小程序',
+        appid: prep.appid || '',
+        // 微信 PC 唯一认的直达链接；没有 appid 就是空串
+        scheme: prep.scheme || '',
+        hosts: prep.hosts || [],
+        ruleHosts: prep.ruleHosts || [],
+        // 小程序没有入口链接也拿不到域名清单，只能全量解密（例外表除外）
+        openCapture: Boolean(prep.openCapture),
+        capturedHosts: [],
+        proxyRunning: Boolean(prep.proxyRunning),
+        // 上一次拉起的结果：没登记桌面时是 false，右侧要据此给出「添加一次桌面」的指引
+        launch: prep.launch || null
+      }
+      paramPageUrl.value = ''
+      // 拉起结果由主进程校验过（窗口/进程增量），不是「发了链接就算成功」
+      const launch = prep.launch || {}
+      paramHint.value = launch.ok
+        ? `已打开《${miniappInfo.value.name}》，登录会员后参数会自动抓回左边`
+        : launch.message || `请在微信里搜索并打开《${miniappInfo.value.name}》，登录会员即可`
+      // launch 失败说明缺「添加到桌面」这道登记，不是工具坏了 —— 交给右边卡片讲清楚
+      paramPageError.value = ''
+    } else {
+      miniappInfo.value = null
+      // 同一个地址再点一次也要真的重新加载（页面可能已经跳到别处）
+      paramPageUrl.value = ''
+      await nextTick()
+      paramPageUA.value = prep.userAgent || ''
+      paramPartition.value = prep.partition || 'persist:param-web'
+      paramPageUrl.value = prep.url
+      paramHint.value = '页面已打开：在里面登录一次，抓到的值会自动回填'
+    }
   } catch (e) {
     ElMessage.error(e.message || '打开入口失败')
     capturing.value = false
@@ -387,16 +470,21 @@ async function captureParams() {
       cinema: payload,
       // 页面已经由 webview 打开，这里只抓不打开
       launch: false,
-      // 主进程也会自己找内嵌页，这里能拿到就顺手带上，省一次查找
-      webContentsId: paramWebContentsId || 0,
-      // 登录要输账号、等验证码，给两分钟
-      waitMs: 120000
+      // 主进程也会自己找内嵌页；小程序模式根本没有内嵌页，传 0 免得串到上一家的页面
+      webContentsId: paramMode.value === 'h5' ? paramWebContentsId || 0 : 0,
+      // 登录要输账号、等验证码，给两分钟；小程序还得先去微信里搜出小程序，多给一分钟
+      waitMs: paramMode.value === 'miniapp' ? 180000 : 120000
     })
     if (!res?.ok) {
       ElMessage.error(res?.message || '获取失败')
       return
     }
     if (Array.isArray(res.rows) && res.rows.length) liveRows.value = res.rows
+    // 这一轮实际解开了哪些域名：抓不到时第一时间要看的就是它
+    if (miniappInfo.value) {
+      miniappInfo.value.capturedHosts = res.capturedHosts || []
+      miniappInfo.value.openCapture = Boolean(res.openCapture)
+    }
     // 推送是增量的，这里再兜一次底：推送丢了也能拿到最终结果
     // 人工改过的字段不参与合并，否则刚改完就被结果覆盖
     paramValues.value = { ...paramValues.value, ...withoutManual(res.values) }
@@ -413,7 +501,7 @@ async function captureParams() {
       // 主进程只知道 key，弹窗里说的是 label（member_cost → 会员成本），翻译一下再给人看
       const labelOf = (key) => rows.find((row) => row.key === key)?.label || key
       const names = res.missing.map(labelOf).join('、')
-      paramHint.value = `已抓 ${got} 个参数`
+      paramHint.value = `已抓 ${got} 个参数，还差：${names}`
       ElMessage.warning(paramHint.value)
     } else {
       paramHint.value = `已抓齐 ${got} 个参数`
@@ -431,6 +519,41 @@ async function stopCapture() {
   await invoke('cinemas:capture-params:stop')
   capturing.value = false
   paramHint.value = '已停止采集'
+}
+
+/** 用 appid 拼出的直达链接，直接调主进程打微信；失败原因由主进程按窗口增量判定，文案直接用它给的 */
+async function reopenMiniapp() {
+  const cinema = dialogCinema.value
+  if (!cinema) return
+  const res = await invoke('cinemas:entry:open', {
+    systemCode: cinema.systemCode || '',
+    appid: miniappInfo.value?.appid || '',
+    cinema: {
+      name: cinema.name,
+      accessUrl: cinema.accessUrl || '',
+      accessType: cinema.accessType || '',
+      accessAppId: cinema.accessAppId || ''
+    }
+  })
+  if (res?.ok) ElMessage.success(res.message || '已通过 appid 打开微信小程序')
+  else ElMessage.warning(res?.message || '直达失败，请检查后台是否填了小程序 appid')
+  // 结果留在卡片里：微信静默丢弃时，这条提示是操作员唯一的线索
+  if (miniappInfo.value) miniappInfo.value.launch = res || null
+}
+
+/**
+ * 用微信搜索框打开（不需要「添加到电脑桌面」）。
+ *
+ * 主进程会自己激活微信、填词、回车，全程几百毫秒；失败时把原因原样带回来，
+ * 因为它依赖前台窗口和搜索词，报错信息比「打开失败」有用得多。
+ */
+async function openBySearch() {
+  const name = miniappInfo.value?.name || dialogCinema.value?.name || ''
+  if (!name) return
+  const res = await invoke('cinemas:miniapp:search-open', { name })
+  if (res?.ok) ElMessage.success(res.message || '已用搜索打开小程序')
+  else ElMessage.warning(res?.message || '搜索打开失败')
+  if (miniappInfo.value) miniappInfo.value.launch = res || null
 }
 
 /** 提示里用 label（手机号），不要甩出 key（mobile）——页面上给人看的是前者
@@ -638,11 +761,11 @@ onUnmounted(() => {
 
     <LoginDialog v-model="loginOpen" @success="reload" />
 
-    <!-- 参数：左边字段表，右边直接嵌该影城的入口页面，登录和回填在同一屏完成 -->
+    <!-- 参数：H5 左边字段表 + 右边内嵌入口页；小程序没有可嵌的页面，只留左栏 -->
     <el-dialog
       v-model="paramDialog"
       :title="dialogCinema ? `影城参数 · ${dialogCinema.name}` : '影城参数'"
-      width="980px"
+      :width="paramMode === 'miniapp' ? '620px' : '980px'"
       align-center
       class="param-dialog"
     >
@@ -691,14 +814,36 @@ onUnmounted(() => {
           <div v-else class="empty-cell">该影城没有额外的采集参数</div>
           <div v-if="capturing || paramHint" class="p-hint">
             <template v-if="capturing">
-              {{ paramHint || '正在打开入口：在右边页面里登录一次，抓到的值会自动回填' }}
+              {{ paramHint || (paramMode === 'miniapp'
+                ? '正在打开小程序：在里面登录会员，抓到的值会自动回填'
+                : '正在打开入口：在右边页面里登录一次，抓到的值会自动回填') }}
               <span v-if="capturedCount" class="p-count">已抓 {{ capturedCount }} 个</span>
             </template>
             <template v-else>{{ paramHint }}</template>
           </div>
+
+          <!-- 小程序：右侧不再堆信息，只留动作按钮 + 失败原因（微信不报错，这是唯一线索） -->
+          <div v-if="paramMode === 'miniapp'" class="p-mini-actions">
+            <p v-if="miniappAppidInvalid" class="p-mini-fail">
+              后台填的 appid 是 {{ miniappInfo?.appid?.length || 0 }} 位，正确应是 18 位（wx + 16 位十六进制）
+            </p>
+            <p v-if="miniappInfo?.launch && !miniappInfo.launch.ok" class="p-mini-fail">
+              {{ miniappInfo.launch.message }}
+            </p>
+            <div class="p-mini-btns">
+              <!-- <el-button
+                size="small"
+                :disabled="!miniappInfo?.appid || miniappAppidInvalid"
+                @click="reopenMiniapp"
+              >
+                用 appid 直达小程序
+              </el-button>
+              <el-button size="small" @click="openBySearch">用搜索打开（实验）</el-button> -->
+            </div>
+          </div>
         </div>
 
-        <div class="p-right">
+        <div v-if="paramMode !== 'miniapp'" class="p-right">
           <webview
             v-if="paramPageUrl"
             :ref="bindWebview"
@@ -718,7 +863,14 @@ onUnmounted(() => {
       <template #footer>
         <el-button size="small" @click="paramDialog = false">取消</el-button>
         <el-button v-if="capturing" size="small" @click="stopCapture">停止</el-button>
-        <el-button size="small" type="primary" :loading="capturing" @click="captureParams">
+        <el-button
+          size="small"
+          type="primary"
+          :loading="capturing"
+          :disabled="!canCapture"
+          :title="canCapture ? '' : '后台没有配置入口链接或小程序 appId'"
+          @click="captureParams"
+        >
           {{ capturing ? `采集中 ${capturedCount}` : '获取参数' }}
         </el-button>
       </template>
@@ -1134,6 +1286,30 @@ tbody tr:hover td {
   margin-top: 6px;
   color: var(--err);
   font-size: 11px;
+}
+
+/* 拉起失败：微信不会报错，这条是操作员唯一的线索，得让它显眼一点 */
+.p-mini-fail {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+  font-size: 10.5px;
+  line-height: 1.7;
+}
+
+/* 小程序模式没有右栏，两个动作按钮落在参数表下面 */
+.p-mini-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.p-mini-btns {
+  display: flex;
+  gap: 8px;
 }
 
 .dlg-row {
