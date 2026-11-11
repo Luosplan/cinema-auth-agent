@@ -58,15 +58,63 @@ routers.push(
 // 路径与 H5 会员端一致：/web/cinema-accounts/group-tree（复数 accounts，按文件名挂载）
 routers.push(
   new EventRoute('cinemas:tree', 'invoke', async (api) => {
+    const { ctx } = api
     try {
-      const data = await api.ctx.auth.get('/web/cinema-accounts/group-tree')
+      const data = await ctx.auth.get('/web/cinema-accounts/group-tree')
+      // 入口链接/appId 允许每台采集机自己覆盖（比如某家后台没配、或小程序要指定 appid）
+      const entries = ctx.config.get('cinemas.entry') || {}
+      const tree = (data.tree || []).map((sys) => ({
+        ...sys,
+        children: (sys.children || []).map((c) => ({
+          ...c,
+          entry: entries[c.id] || null
+        }))
+      }))
       return {
         ok: true,
-        tree: data.tree || [],
-        autoRenew: api.ctx.config.get('cinemas.autoRenew') || {}
+        tree,
+        autoRenew: ctx.config.get('cinemas.autoRenew') || {}
       }
     } catch (e) {
       return { ok: false, message: e.message, status: e.status || 0 }
+    }
+  })
+)
+
+/**
+ * 保存某家影城的入口（本机覆盖）。
+ * 只存「怎么打开」，不改后台的 accessType —— 类型决定用哪套适配器，不能让采集端改。
+ */
+routers.push(
+  new EventRoute('cinemas:entry:set', 'invoke', async (api, data) => {
+    const params = data.params || {}
+    const id = Number(params.cinemaGroupId || 0)
+    if (!id) return { ok: false, message: '缺少影城 ID' }
+
+    const map = { ...(api.ctx.config.get('cinemas.entry') || {}) }
+    const url = String(params.url || '').trim()
+    const appid = String(params.appid || '').trim()
+
+    if (!url && !appid) delete map[id]
+    else map[id] = { ...(url ? { url } : {}), ...(appid ? { appid } : {}) }
+
+    api.ctx.config.set('cinemas.entry', map)
+    return { ok: true, entry: map[id] || null }
+  })
+)
+
+/** 「访问」：按覆盖 → 影城 accessUrl → 规则入口 的顺序打开，不做抓包等待 */
+routers.push(
+  new EventRoute('cinemas:entry:open', 'invoke', async (api, data) => {
+    const params = data.params || {}
+    const rule = api.ctx.extractor.activeRules.find((r) => r.id === String(params.systemCode || ''))
+    if (!rule) {
+      return { ok: false, message: `系统「${params.systemCode || '未知'}」没有抓包规则，无法打开` }
+    }
+    try {
+      return api.ctx.openEntry(rule, params.cinema || {})
+    } catch (e) {
+      return { ok: false, message: e.message }
     }
   })
 )

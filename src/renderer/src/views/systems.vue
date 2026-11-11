@@ -1,280 +1,555 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { invoke } from '@utils/ipc'
+import { auth, loadAuth } from '../stores/auth'
+import LoginDialog from '../components/LoginDialog.vue'
 
+/**
+ * 影城配置：左边出票系统，右边这套系统下的影城。
+ *
+ * 每行能改的是「怎么打开这家影城」：
+ *   - 类型（H5 / 小程序）来自后台，决定用哪套适配器，这里只读；
+ *   - 入口链接 / 小程序 appId 可以按影城覆盖，保存在本机。
+ * 打开顺序：本机覆盖 > 后台给这家影城配的 accessUrl > 这套程序的公共入口。
+ *
+ * 另外保留每个系统的「采集域名」——只有列出的域名会被解密，
+ * 域名是系统级的，所以放在右栏顶部，跟着左边的系统切换。
+ */
+
+const tree = ref([])
 const rules = ref([])
-const drafts = reactive({})
-const inputs = reactive({})
-const saved = reactive({})
-const saving = ref('')
+const activeSystemId = ref(0)
+const keyword = ref('')
+const loading = ref(false)
+const error = ref('')
+const loginOpen = ref(false)
 
-/** 一份草稿的指纹：域名 + 开关 + 入口，任一处变了才允许保存 */
-function fingerprint(draft) {
-  if (!draft) return ''
-  const l = draft.launch || {}
-  return [draft.hosts.join('|'), draft.enabled ? '1' : '0', l.type || '', l.url || '', l.appid || ''].join(
-    '\u0001'
-  )
-}
+const activeSystem = computed(
+  () => tree.value.find((s) => s.id === activeSystemId.value) || null
+)
+const cinemas = computed(() => activeSystem.value?.children || [])
 
-const dirty = (id) => !!drafts[id] && fingerprint(drafts[id]) !== saved[id]
+const filtered = computed(() => {
+  const kw = keyword.value.trim().toLowerCase()
+  if (!kw) return cinemas.value
+  return cinemas.value.filter((c) => String(c.name || '').toLowerCase().includes(kw))
+})
 
-const EXPIRY_TEXT = {
-  sliding: '滑动续期（有心跳就不失效）',
-  absolute: '绝对过期（到点必须重新登录）'
-}
+/** 一套系统下所有影城共用一个抓包规则，取第一个影城的 systemCode 即可 */
+const systemCode = computed(
+  () => cinemas.value.find((c) => c.systemCode)?.systemCode || ''
+)
+const activeRule = computed(() => rules.value.find((r) => r.id === systemCode.value) || null)
 
-async function load() {
-  const list = await invoke('rules:list')
-  rules.value = list || []
-  for (const rule of rules.value) {
-    drafts[rule.id] = {
-      hosts: [...(rule.hosts || [])],
-      enabled: rule.enabled !== false,
-      launch: {
-        type: rule.launch?.type || '',
-        url: rule.launch?.url || '',
-        appid: rule.launch?.appid || ''
-      }
+async function loadTree() {
+  loading.value = true
+  error.value = ''
+  try {
+    const res = await invoke('cinemas:tree')
+    if (!res?.ok) {
+      error.value = res?.message || '加载失败'
+      tree.value = []
+      return
     }
-    saved[rule.id] = fingerprint(drafts[rule.id])
-    if (!inputs[rule.id]) inputs[rule.id] = ''
+    tree.value = res.tree || []
+    if (!tree.value.some((s) => s.id === activeSystemId.value)) {
+      activeSystemId.value = tree.value[0]?.id || 0
+    }
+  } catch (e) {
+    error.value = e.message || '加载失败'
+  } finally {
+    loading.value = false
   }
 }
 
-function addHost(ruleId) {
-  const value = (inputs[ruleId] || '').trim().toLowerCase()
+async function loadRules() {
+  rules.value = (await invoke('rules:list')) || []
+}
+
+/* ---- 采集域名（系统级） ---- */
+const hosts = ref([])
+const hostsSaved = ref('')
+const hostInput = ref('')
+const savingHosts = ref(false)
+
+function syncHosts() {
+  hosts.value = [...(activeRule.value?.hosts || [])]
+  hostsSaved.value = hosts.value.join('|')
+  hostInput.value = ''
+}
+
+const hostsDirty = computed(() => hosts.value.join('|') !== hostsSaved.value)
+
+function addHost() {
+  const value = hostInput.value.trim().toLowerCase()
   if (!value) return
   if (!/^[a-z0-9*.-]+$/.test(value)) {
     ElMessage.warning('域名格式不正确')
     return
   }
-  const list = drafts[ruleId].hosts
-  if (list.includes(value)) {
+  if (hosts.value.includes(value)) {
     ElMessage.warning('该域名已存在')
     return
   }
-  list.push(value)
-  inputs[ruleId] = ''
+  hosts.value.push(value)
+  hostInput.value = ''
 }
 
-function removeHost(ruleId, host) {
-  const list = drafts[ruleId].hosts
-  const idx = list.indexOf(host)
-  if (idx > -1) list.splice(idx, 1)
+function removeHost(host) {
+  const idx = hosts.value.indexOf(host)
+  if (idx > -1) hosts.value.splice(idx, 1)
 }
 
-/** 空对象会被当成「没配置」，显式给 null 才能真正清掉已有的入口 */
-function buildLaunch(draft) {
-  const type = draft.launch.type
-  if (!type) return null
-  const url = draft.launch.url.trim()
-  const appid = draft.launch.appid.trim()
-  if (!url && !appid) return null
-  const launch = { type }
-  if (url) launch.url = url
-  if (appid) launch.appid = appid
-  return launch
-}
-
-async function save(ruleId) {
-  const draft = drafts[ruleId]
-  const launch = buildLaunch(draft)
-  if (draft.launch.type && !launch) {
-    ElMessage.warning('填了入口类型就要给个链接或 appid，否则等于没配')
-    return
-  }
-
-  saving.value = ruleId
+async function saveHosts() {
+  if (!systemCode.value) return
+  savingHosts.value = true
   try {
-    await invoke('config:update', {
-      rules: {
-        [ruleId]: {
-          hosts: draft.hosts,
-          enabled: draft.enabled,
-          launch
-        }
-      }
-    })
-    ElMessage.success('已保存，规则立即生效')
-    await load()
+    await invoke('config:update', { rules: { [systemCode.value]: { hosts: hosts.value } } })
+    ElMessage.success('域名已保存，立即生效')
+    await loadRules()
   } catch (e) {
     ElMessage.error(`保存失败：${e.message}`)
   } finally {
-    saving.value = ''
+    savingHosts.value = false
   }
 }
 
-onMounted(load)
+/* ---- 入口展示 ---- */
+function typeText(cinema) {
+  const raw = String(cinema?.accessType || '').toLowerCase()
+  if (raw === 'h5') return 'H5'
+  if (raw === 'miniapp' || raw === 'miniprogram' || raw === 'wx') return '小程序'
+  return cinema?.accessType || '—'
+}
+
+function isMini(cinema) {
+  return String(cinema?.accessType || '').toLowerCase() === 'miniapp'
+}
+
+function entryUrlOf(cinema) {
+  return cinema?.entry?.url || cinema?.accessUrl || ''
+}
+
+function appIdOf(cinema) {
+  return cinema?.entry?.appid || (isMini(cinema) ? activeRule.value?.launch?.appid || '' : '')
+}
+
+/** 本机改过就标一下，避免和后台配的入口混淆 */
+function isOverridden(cinema) {
+  return Boolean(cinema?.entry && (cinema.entry.url || cinema.entry.appid))
+}
+
+/* ---- 访问 / 编辑 ---- */
+async function visit(cinema) {
+  const res = await invoke('cinemas:entry:open', {
+    systemCode: cinema.systemCode || systemCode.value,
+    cinema: {
+      name: cinema.name,
+      accessType: cinema.accessType,
+      accessUrl: cinema.accessUrl,
+      entry: cinema.entry || null
+    }
+  })
+  if (!res?.ok) ElMessage.error(res?.message || '打不开这家影城的入口')
+  else if (res.hint) ElMessage.info(res.hint)
+  else ElMessage.success('已打开入口')
+}
+
+const editOpen = ref(false)
+const editing = ref(null)
+const form = reactive({ url: '', appid: '' })
+
+function openEdit(cinema) {
+  editing.value = cinema
+  form.url = entryUrlOf(cinema)
+  form.appid = cinema?.entry?.appid || (isMini(cinema) ? activeRule.value?.launch?.appid || '' : '')
+  editOpen.value = true
+}
+
+async function saveEntry() {
+  const cinema = editing.value
+  if (!cinema) return
+  const res = await invoke('cinemas:entry:set', {
+    cinemaGroupId: cinema.id,
+    url: form.url,
+    appid: isMini(cinema) ? form.appid : ''
+  })
+  if (!res?.ok) {
+    ElMessage.error(res?.message || '保存失败')
+    return
+  }
+  cinema.entry = res.entry || null
+  editOpen.value = false
+  ElMessage.success(res.entry ? '已保存到本机' : '已清空，改回使用后台配置的入口')
+}
+
+watch([systemCode, rules], syncHosts, { immediate: true })
+
+onMounted(async () => {
+  await loadAuth()
+  await loadRules()
+  if (auth.loggedIn) await loadTree()
+})
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-inner">
-      <div class="page-head">
-        <div>
-          <h1 class="page-title">影城配置</h1>
-          <p class="page-desc">
-            每套出票程序在这里配两样：入口链接（点「获取参数」时用它打开页面，H5 和小程序都能填）
-            和解密域名（只有列出的域名会被解密，其余流量原样直通，不影响客户机上的其他网站）。支持
-            <code class="mono">*.example.com</code> 通配。
-          </p>
-        </div>
-      </div>
-
-      <div v-if="!rules.length" class="empty-box">规则加载中…</div>
-
-      <div v-else class="rules">
-        <div v-for="rule in rules" :key="rule.id" class="rule">
-          <div class="rule-head">
-            <div class="rule-id">
-              <span class="rule-name">{{ rule.name }}</span>
-              <span class="pill" :class="drafts[rule.id]?.hosts.length ? 'ok' : ''">
-                {{ drafts[rule.id]?.hosts.length ? '采集中' : '未配置' }}
-              </span>
-            </div>
-            <el-switch v-model="drafts[rule.id].enabled" size="small" @change="save(rule.id)" />
-          </div>
-
-          <!-- 入口：点「获取参数」时用哪个地址打开。影城自己配了链接的优先用影城的，这里是兜底 -->
-          <div class="field">
-            <span class="field-label">入口</span>
-            <div class="field-body">
-              <div class="entry-row">
-                <el-select
-                  v-model="drafts[rule.id].launch.type"
-                  size="small"
-                  class="entry-type"
-                  placeholder="未设置"
-                >
-                  <el-option label="H5" value="h5" />
-                  <el-option label="小程序" value="miniapp" />
-                </el-select>
-                <el-input
-                  v-model="drafts[rule.id].launch.url"
-                  size="small"
-                  class="entry-url"
-                  :placeholder="
-                    drafts[rule.id].launch.type === 'miniapp'
-                      ? '小程序链接 / 短链，可留空（留空则用下面的 appid 唤起微信）'
-                      : 'https://h5.example.com/ticket'
-                  "
-                  clearable
-                />
-              </div>
-              <div v-if="drafts[rule.id].launch.type === 'miniapp'" class="entry-row">
-                <el-input
-                  v-model="drafts[rule.id].launch.appid"
-                  size="small"
-                  class="entry-url appid"
-                  placeholder="小程序 appid（没有链接时用它唤起微信，可留空）"
-                  clearable
-                />
-              </div>
-              <p class="entry-tip">
-                影城在后台配了自己的入口时优先用影城的；这里填的是这套程序的公共入口。
-                小程序没有可用的网页入口时，链接留空、填 appid 即可。
-              </p>
-            </div>
-          </div>
-
-          <div class="field">
-            <span class="field-label">域名</span>
-            <div class="field-body">
-              <div class="host-tags">
-                <span v-for="host in drafts[rule.id].hosts" :key="host" class="host">
-                  <span class="mono">{{ host }}</span>
-                  <button class="host-x" title="移除" @click="removeHost(rule.id, host)">×</button>
-                </span>
-                <span v-if="!drafts[rule.id].hosts.length" class="host-empty">尚未添加</span>
-              </div>
-
-              <div class="host-add">
-                <el-input
-                  v-model="inputs[rule.id]"
-                  size="small"
-                  placeholder="app.example.com"
-                  class="host-input"
-                  @keyup.enter="addHost(rule.id)"
-                />
-                <el-button size="small" @click="addHost(rule.id)">添加</el-button>
-              </div>
-            </div>
-          </div>
-
-          <div class="rule-foot">
-            <span class="k">过期策略</span>
-            <span class="v">{{ EXPIRY_TEXT[rule.expiry?.type] || '未知' }}</span>
-            <el-button
-              size="small"
-              type="primary"
-              class="foot-save"
-              :loading="saving === rule.id"
-              :disabled="!dirty(rule.id)"
-              @click="save(rule.id)"
-            >
-              保存
-            </el-button>
-          </div>
-        </div>
+  <div class="config">
+    <div class="head">
+      <h1 class="head-title">影城配置</h1>
+      <div class="head-actions">
+        <el-input
+          v-model="keyword"
+          size="small"
+          placeholder="搜索影城"
+          clearable
+          class="search"
+        />
+        <el-button size="small" @click="loadTree">刷新</el-button>
       </div>
     </div>
+
+    <div v-if="!auth.loggedIn" class="placeholder">
+      <div class="placeholder-text">登录会员账号后可配置影城入口与采集域名</div>
+      <el-button size="small" type="primary" @click="loginOpen = true">登录</el-button>
+    </div>
+
+    <template v-else>
+      <div v-if="error" class="placeholder">
+        <div class="placeholder-text err">{{ error }}</div>
+        <el-button size="small" @click="loadTree">重试</el-button>
+      </div>
+
+      <div v-else-if="loading" class="placeholder">
+        <div class="placeholder-text">加载中…</div>
+      </div>
+
+      <div v-else-if="!tree.length" class="placeholder">
+        <div class="placeholder-text">该会员账号下没有可用的出票系统</div>
+      </div>
+
+      <div v-else class="split">
+        <!-- 左：出票系统 -->
+        <aside class="systems">
+          <div class="systems-title">出票系统</div>
+          <div class="sys-list">
+            <div
+              v-for="sys in tree"
+              :key="sys.id"
+              class="sys-item"
+              :class="{ active: sys.id === activeSystemId }"
+              role="button"
+              tabindex="0"
+              @click="activeSystemId = sys.id"
+              @keyup.enter="activeSystemId = sys.id"
+            >
+              <span class="sys-name">{{ sys.name }}</span>
+              <span class="sys-count">{{ sys.children?.length || 0 }}</span>
+            </div>
+          </div>
+          <div class="systems-foot">共 {{ cinemas.length }} 家影城</div>
+        </aside>
+
+        <!-- 右：该系统下的影城 + 采集域名 -->
+        <div class="right">
+          <div class="hosts">
+            <span class="hosts-label">采集域名</span>
+            <div class="hosts-body">
+              <template v-if="activeRule">
+                <div class="host-tags">
+                  <span v-for="host in hosts" :key="host" class="host">
+                    <span class="mono">{{ host }}</span>
+                    <button class="host-x" title="移除" @click="removeHost(host)">×</button>
+                  </span>
+                  <span v-if="!hosts.length" class="host-empty">尚未添加，采集不会生效</span>
+                </div>
+                <div class="host-add">
+                  <el-input
+                    v-model="hostInput"
+                    size="small"
+                    placeholder="app.example.com"
+                    class="host-input"
+                    @keyup.enter="addHost"
+                  />
+                  <el-button size="small" @click="addHost">添加</el-button>
+                  <el-button
+                    size="small"
+                    type="primary"
+                    :loading="savingHosts"
+                    :disabled="!hostsDirty"
+                    @click="saveHosts"
+                  >
+                    保存
+                  </el-button>
+                </div>
+              </template>
+              <span v-else class="host-empty">
+                这套系统还没有抓包规则，采集域名暂不可配置
+              </span>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <colgroup>
+                <col style="width: 29%" />
+                <col style="width: 11%" />
+                <col style="width: 30%" />
+                <col style="width: 15%" />
+                <col style="width: 15%" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>名称</th>
+                  <th class="center-head">类型</th>
+                  <th>入口链接</th>
+                  <th>appId</th>
+                  <th class="center-head">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="cinema in filtered" :key="cinema.id">
+                  <td>
+                    <div class="name-inner">
+                      <span class="name" :title="cinema.name">{{ cinema.name }}</span>
+                      <span v-if="isOverridden(cinema)" class="tag">本机</span>
+                    </div>
+                  </td>
+                  <td class="center">{{ typeText(cinema) }}</td>
+                  <td class="mono url" :title="entryUrlOf(cinema)">
+                    <span v-if="entryUrlOf(cinema)">{{ entryUrlOf(cinema) }}</span>
+                    <span v-else class="dim">未设置</span>
+                  </td>
+                  <td class="mono appid" :title="appIdOf(cinema)">
+                    <span v-if="appIdOf(cinema)">{{ appIdOf(cinema) }}</span>
+                    <span v-else class="dim">—</span>
+                  </td>
+                  <td class="ops">
+                    <button class="op-link" @click="visit(cinema)">访问</button>
+                    <button class="op-link" @click="openEdit(cinema)">编辑</button>
+                  </td>
+                </tr>
+                <tr v-if="!filtered.length">
+                  <td colspan="5" class="no-result">
+                    {{ cinemas.length ? '没有匹配的影城' : '该系统下暂无影城' }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <LoginDialog v-model="loginOpen" @success="loadTree" />
+
+    <!-- 编辑入口：类型由后台决定，只改「怎么打开」 -->
+    <el-dialog
+      v-model="editOpen"
+      :title="editing ? `影城入口 · ${editing.name}` : '影城入口'"
+      width="520px"
+      align-center
+    >
+      <div v-if="editing" class="dlg">
+        <div class="dlg-row">
+          <span class="k">类型</span>
+          <span class="v">{{ typeText(editing) }}（由后台决定，不可改）</span>
+        </div>
+        <div class="dlg-row">
+          <span class="k">链接</span>
+          <el-input
+            v-model="form.url"
+            size="small"
+            clearable
+            :placeholder="
+              isMini(editing)
+                ? '小程序链接 / 短链，可留空'
+                : 'https://h5.example.com/ticket'
+            "
+          />
+        </div>
+        <div v-if="isMini(editing)" class="dlg-row">
+          <span class="k">appId</span>
+          <el-input v-model="form.appid" size="small" clearable placeholder="wx0123456789abcdef" />
+        </div>
+        <p class="dlg-tip">
+          保存在本机，不影响后台配置。两项都留空即改回使用后台给这家影城配的入口。
+          打开顺序：本机设置 → 后台入口 → 这套程序的公共入口。
+        </p>
+      </div>
+
+      <template #footer>
+        <el-button size="small" @click="editOpen = false">取消</el-button>
+        <el-button size="small" type="primary" @click="saveEntry">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <style lang="scss" scoped>
-.rules {
-  margin-top: 4px;
-  border-top: 1px solid var(--line-soft);
+.config {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 22px 0 0;
 }
 
-.rule {
-  padding: 14px 10px 16px;
-  margin: 0 -10px;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.rule:last-child {
-  border-bottom: none;
-}
-
-.rule-head {
+.head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 20px;
+  padding: 0 26px 14px;
 }
 
-.rule-id {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.rule-name {
-  font-size: 13.5px;
+.head-title {
+  margin: 0;
+  font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--tx);
 }
 
-/* 标签 - 值 的栅格，比上下堆叠更省纵向空间 */
-.field {
+.head-actions {
   display: flex;
-  gap: 14px;
-  margin-top: 12px;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
-.field-label {
-  width: 34px;
+.search {
+  width: 200px;
+}
+
+.placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding-bottom: 60px;
+}
+
+.placeholder-text {
+  font-size: 12.5px;
+  color: var(--tx-3);
+}
+
+.placeholder-text.err {
+  color: var(--err);
+}
+
+/* ---- 左右分栏 ---- */
+.split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.systems {
+  width: 176px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 10px 16px 16px;
+  border-right: 1px solid var(--line-soft);
+}
+
+.systems-title {
+  flex-shrink: 0;
+  padding: 0 8px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--tx-4);
+}
+
+.sys-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin-right: -4px;
+  padding-right: 4px;
+}
+
+.sys-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--tx-2);
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.sys-item:hover {
+  background: var(--bg-hover);
+  color: var(--tx);
+}
+
+.sys-item.active {
+  background: var(--bg-active);
+  color: var(--tx);
+  font-weight: 500;
+  box-shadow: inset 2px 0 0 var(--tx);
+}
+
+.sys-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sys-count {
+  font-size: 11px;
+  color: var(--tx-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.sys-item.active .sys-count {
+  color: var(--tx-3);
+}
+
+.systems-foot {
+  flex-shrink: 0;
+  margin-top: 8px;
+  padding: 8px 8px 0;
+  border-top: 1px solid var(--line-soft);
+  font-size: 10.5px;
+  color: var(--tx-4);
+}
+
+/* ---- 右栏 ---- */
+.right {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 域名是系统级的，放表格上方，跟着左边的系统切 */
+.hosts {
+  display: flex;
+  gap: 12px;
+  padding: 0 26px 12px 16px;
+}
+
+.hosts-label {
   flex-shrink: 0;
   padding-top: 4px;
   font-size: 11.5px;
   color: var(--tx-4);
 }
 
-.field-body {
+.hosts-body {
   flex: 1;
   min-width: 0;
 }
@@ -333,73 +608,170 @@ onMounted(load)
 }
 
 .host-input {
-  width: 230px;
+  width: 220px;
 }
 
-/* 与 small 输入框（26px）取齐，默认 small 按钮只有 24px */
 .host-add .el-button {
   height: 26px;
 }
 
-/* 入口一行：类型下拉 + 链接输入，两个控件同高、左对齐 */
-.entry-row {
+/* ---- 表格 ---- */
+.table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 26px 16px 16px;
+}
+
+table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  height: 30px;
+  padding: 0 10px;
+  text-align: left;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--tx-4);
+  background: var(--bg-panel);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.center-head {
+  text-align: center;
+}
+
+tbody td {
+  padding: 8px 10px;
+  font-size: 12.5px;
+  color: var(--tx-2);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+tbody tr:hover td {
+  background: #fafafb;
+}
+
+.center {
+  text-align: center;
+}
+
+.name-inner {
   display: flex;
   align-items: center;
   gap: 6px;
-}
-
-.entry-row + .entry-row {
-  margin-top: 6px;
-}
-
-.entry-type {
-  width: 96px;
-  flex: none;
-}
-
-.entry-url {
-  flex: 1;
   min-width: 0;
-  max-width: 460px;
 }
 
-.entry-url.appid {
-  margin-left: 102px;
+.name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--tx);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.entry-tip {
-  margin: 7px 0 0;
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--tx-4);
+/* 「本机」标记：提醒这条入口是采集端改过的，不是后台配置 */
+.tag {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--tx-3);
+  background: var(--bg-hover);
 }
 
-.rule-foot {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 12px;
-  padding-left: 48px;
+.url {
   font-size: 11.5px;
 }
 
-.rule-foot .k {
+.appid {
+  font-size: 11px;
+}
+
+.dim {
   color: var(--tx-4);
 }
 
-.rule-foot .v {
-  color: var(--tx-3);
+.ops {
+  text-align: center;
+  white-space: nowrap;
 }
 
-.foot-save {
-  margin-left: auto;
-  height: 26px;
+.op-link {
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  color: var(--tx-2);
+  cursor: pointer;
 }
 
-code {
-  padding: 1px 4px;
-  border-radius: 3px;
-  background: var(--bg-hover);
+.op-link + .op-link {
+  margin-left: 4px;
+}
+
+.op-link:hover {
+  color: var(--tx);
+  text-decoration: underline;
+}
+
+.no-result {
+  padding: 26px 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--tx-4);
+}
+
+/* ---- 弹窗 ---- */
+.dlg {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dlg-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dlg-row .k {
+  width: 48px;
+  flex-shrink: 0;
+  font-size: 11.5px;
+  color: var(--tx-4);
+}
+
+.dlg-row .v {
+  font-size: 12px;
+  color: var(--tx-2);
+}
+
+.dlg-tip {
+  margin: 2px 0 0;
   font-size: 11px;
+  line-height: 1.7;
+  color: var(--tx-4);
 }
 </style>

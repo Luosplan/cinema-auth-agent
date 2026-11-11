@@ -194,10 +194,13 @@ function updateTrayMenu() {
  *      不能直达某个页面，微信侧通常回「当前页面无法访问」—— 这条只是尽力而为的兜底。
  */
 function openEntry(rule, cinema = {}) {
-  const accessUrl = String(cinema.accessUrl || '').trim()
+  // 本机覆盖 > 后台给这家影城配的 accessUrl > 这套程序的公共入口
+  const override = cinema.entry || {}
+  const accessUrl = String(override.url || cinema.accessUrl || '').trim()
   const accessType = String(cinema.accessType || '').toLowerCase()
   const ruleUrl = String(rule?.launch?.url || '').trim()
   const url = accessUrl || ruleUrl
+  const appid = String(override.appid || rule?.launch?.appid || '').trim()
 
   // 有 H5 地址就开窗，不管 accessType 写的是什么：能进页面才有流量
   if (url) {
@@ -260,7 +263,6 @@ function openEntry(rule, cinema = {}) {
   }
 
   if (accessType === 'miniapp' || rule?.launch?.type === 'miniapp') {
-    const appid = rule?.launch?.appid || ''
     const name = rule?.launch?.name || rule?.name || cinema.name || '该小程序'
     const scheme = rule?.launch?.scheme || (appid ? `weixin://dl/business/?appid=${appid}` : '')
     if (scheme) {
@@ -284,7 +286,7 @@ async function startProxy() {
   ctx.extractor.setRules(mergeRules(ctx.config.get('rules')))
 
   if (!ctx.extractor.activeRules.some((r) => (r.hosts || []).length)) {
-    log('warn', '没有任何系统配置了域名，采集不会生效。请先在「系统配置」里填写接口域名')
+    log('warn', '没有任何系统配置了域名，采集不会生效。请先在「影城配置」里填写接口域名')
   }
 
   const actualPort = await ctx.proxy.start(port)

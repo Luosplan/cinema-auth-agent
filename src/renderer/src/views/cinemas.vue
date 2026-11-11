@@ -273,7 +273,9 @@ async function captureParams() {
       cinema: {
         name: cinema.name,
         accessUrl: cinema.accessUrl || '',
-        accessType: cinema.accessType || ''
+        accessType: cinema.accessType || '',
+        // 「影城配置」里改过的入口优先
+        entry: cinema.entry || null
       },
       waitMs: 25000
     })
