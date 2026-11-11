@@ -3,13 +3,13 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { ElMessage } from 'element-plus'
 import { invoke, on } from '@utils/ipc'
 import { auth, loadAuth } from '../stores/auth'
+import { activeSystemId, ensureSystem, selectSystem } from '../stores/activeSystem'
 import LoginDialog from '../components/LoginDialog.vue'
 import CopyIcon from '../components/CopyIcon.vue'
 
 const tree = ref([])
 const autoRenew = ref({})
 const accountsMap = ref({})
-const activeSystemId = ref(0)
 const keyword = ref('')
 const loading = ref(false)
 const accountsLoading = ref(false)
@@ -140,9 +140,8 @@ async function loadTree() {
     }
     tree.value = res.tree || []
     autoRenew.value = res.autoRenew || {}
-    if (!tree.value.some((s) => s.id === activeSystemId.value)) {
-      activeSystemId.value = tree.value[0]?.id || 0
-    }
+    // 缓存的系统可能已经不在树里（换账号/授权变了），只在那种情况下才改选
+    ensureSystem(tree.value)
   } catch (e) {
     error.value = e.message || '加载失败'
   } finally {
@@ -648,8 +647,8 @@ onUnmounted(() => {
               :class="{ active: sys.id === activeSystemId }"
               role="button"
               tabindex="0"
-              @click="activeSystemId = sys.id"
-              @keyup.enter="activeSystemId = sys.id"
+              @click="selectSystem(sys.id)"
+              @keyup.enter="selectSystem(sys.id)"
             >
               <span class="sys-name">{{ sys.name }}</span>
               <span class="sys-count">{{ sys.children?.length || 0 }}</span>

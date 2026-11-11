@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { invoke } from '@utils/ipc'
 import { auth, loadAuth } from '../stores/auth'
+import { activeSystemId, ensureSystem, selectSystem } from '../stores/activeSystem'
 import LoginDialog from '../components/LoginDialog.vue'
 import CopyIcon from '../components/CopyIcon.vue'
 
@@ -18,7 +19,6 @@ import CopyIcon from '../components/CopyIcon.vue'
 
 const tree = ref([])
 const rules = ref([])
-const activeSystemId = ref(0)
 const keyword = ref('')
 const loading = ref(false)
 const error = ref('')
@@ -66,9 +66,8 @@ async function loadTree() {
       return
     }
     tree.value = res.tree || []
-    if (!tree.value.some((s) => s.id === activeSystemId.value)) {
-      activeSystemId.value = tree.value[0]?.id || 0
-    }
+    // 与「影城账号」共用同一个选择：缓存的系统失效时才改选，别把用户的选择冲掉
+    ensureSystem(tree.value)
   } catch (e) {
     error.value = e.message || '加载失败'
   } finally {
@@ -135,6 +134,14 @@ async function copyLink(cinema) {
   if (!url) return ElMessage.warning('这家影城还没有入口链接')
   const ok = await writeClipboard(url)
   ok ? ElMessage.success('已复制入口链接') : ElMessage.warning('剪贴板不可用，请检查系统权限')
+}
+
+/** appId 抄错一位小程序就静默打不开，所以和入口链接一样给个复制按钮，别让人手抄 */
+async function copyAppId(cinema) {
+  const appid = appIdOf(cinema)
+  if (!appid) return ElMessage.warning('这家影城没有配置 appId')
+  const ok = await writeClipboard(appid)
+  ok ? ElMessage.success(`已复制 ${appid}`) : ElMessage.warning('剪贴板不可用，请检查系统权限')
 }
 
 /* ---- 访问 / 编辑 ---- */
@@ -241,8 +248,8 @@ onMounted(async () => {
               :class="{ active: sys.id === activeSystemId }"
               role="button"
               tabindex="0"
-              @click="activeSystemId = sys.id"
-              @keyup.enter="activeSystemId = sys.id"
+              @click="selectSystem(sys.id)"
+              @keyup.enter="selectSystem(sys.id)"
             >
               <span class="sys-name">{{ sys.name }}</span>
               <span class="sys-count">{{ sys.children?.length || 0 }}</span>
@@ -256,11 +263,14 @@ onMounted(async () => {
           <div class="table-wrap">
             <table>
               <colgroup>
-                <col style="width: 32%" />
-                <col style="width: 11%" />
-                <col style="width: 27%" />
-                <col style="width: 15%" />
-                <col style="width: 15%" />
+                <!-- appId 定长 18 位，被截断就看不出抄错没抄错，所以给它最宽的一份；
+                     入口链接再长也是省略号 + 复制按钮，窄一点不影响使用。
+                     这套比例是按最小窗口（900 → 表格 682px）验算过的，appId 不截断 -->
+                <col style="width: 31%" />
+                <col style="width: 9%" />
+                <col style="width: 18%" />
+                <col style="width: 26%" />
+                <col style="width: 16%" />
               </colgroup>
               <thead>
                 <tr>
@@ -306,9 +316,21 @@ onMounted(async () => {
                       </button>
                     </div>
                   </td>
-                  <td class="mono appid" :title="appIdOf(cinema)">
-                    <span v-if="appIdOf(cinema)">{{ appIdOf(cinema) }}</span>
-                    <span v-else class="dim">—</span>
+                  <td class="mono appid">
+                    <div class="appid-inner" :title="appIdOf(cinema)">
+                      <span v-if="appIdOf(cinema)">{{ appIdOf(cinema) }}</span>
+                      <span v-else class="dim">—</span>
+                      <button
+                        v-if="appIdOf(cinema)"
+                        class="copy-btn"
+                        type="button"
+                        title="复制 appId"
+                        aria-label="复制 appId"
+                        @click="copyAppId(cinema)"
+                      >
+                        <CopyIcon />
+                      </button>
+                    </div>
                   </td>
                   <td class="ops">
                     <button class="op-link" @click="visit(cinema)">访问</button>
@@ -635,14 +657,17 @@ tbody tr:hover td {
   stroke-linejoin: round;
 }
 
-.url-inner {
+/* 入口链接和 appId 都要「文本可截断 + 复制按钮不被挤掉」，同一套布局 */
+.url-inner,
+.appid-inner {
   display: flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
 }
 
-.url-inner > span:first-child {
+.url-inner > span:first-child,
+.appid-inner > span:first-child {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
