@@ -53,13 +53,15 @@ routers.push(
   })
 )
 
-// 影城：出票系统（system）→ 影城，数据来自 ticket-server 的 GET /cinemas
+// 影城账号：数据来自「程序账号配置」接口，一行 = 一个出票程序（含账号与凭证状态）
+const CONFIGS_PATH = '/ticket-program-account-configs?includeUnconfigured=1&compact=1'
+
 routers.push(
   new EventRoute('cinemas:tree', 'invoke', async (api) => {
     try {
-      const rows = await api.ctx.auth.get('/cinemas')
+      const rows = await api.ctx.auth.get(CONFIGS_PATH)
       const list = Array.isArray(rows) ? rows : []
-      // 缓存原始行，cinemas:accounts 直接按 id 取，不用重复请求
+      // 缓存原始行，cinemas:accounts 直接按 program_id 取，不用重复请求
       api.ctx.serverCinemas = list
       return {
         ok: true,
@@ -72,20 +74,20 @@ routers.push(
   })
 )
 
-// 影城下的出票账号：从缓存的影城行里取，缓存缺失时回源一次
+// 单个程序的出票账号：从缓存里取，缓存缺失时回源一次（正常路径下树里已带）
 routers.push(
   new EventRoute('cinemas:accounts', 'invoke', async (api, data) => {
-    const cinemaId = Number((data.params || {}).cinemaGroupId || 0)
-    if (!cinemaId) return { ok: false, message: '缺少影城 ID' }
+    const programId = Number((data.params || {}).cinemaGroupId || 0)
+    if (!programId) return { ok: false, message: '缺少程序 ID' }
     try {
       let list = api.ctx.serverCinemas
       if (!Array.isArray(list)) {
-        const rows = await api.ctx.auth.get('/cinemas')
+        const rows = await api.ctx.auth.get(CONFIGS_PATH)
         list = Array.isArray(rows) ? rows : []
         api.ctx.serverCinemas = list
       }
-      const row = list.find((item) => Number(item.id) === cinemaId)
-      if (!row) return { ok: false, message: '未找到该影城' }
+      const row = list.find((item) => Number(item.program_id) === programId)
+      if (!row) return { ok: false, message: '未找到该程序' }
       return { ok: true, lists: accountsOf(row) }
     } catch (e) {
       return { ok: false, message: e.message, status: e.status || 0 }

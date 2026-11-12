@@ -2,9 +2,11 @@
  * 出票系统（ticket-server）响应 → 界面数据结构的适配层。
  *
  * 这里只做纯数据转换，不碰 electron / 网络，方便单独跑脚本验证。
- * 服务端形状见 `GET /api/cinemas`：
- *   [{ id, name, city, system, standard_id, credentials, enabled,
- *      credential_status, credential_checked_at, credential_error }]
+ * 服务端形状见 `GET /api/ticket-program-account-configs?includeUnconfigured=1&compact=1`：
+ *   { success, data: [{ program_id, name, city, system, type, account_id, account_name,
+ *                       account_count, cinema_ids, cinema_id_names, cinema_count,
+ *                       credentials, user_credentials, enabled, credential_status, ... }] }
+ * 一行 = 一个出票程序，账号挂在程序上。
  */
 
 /** 出票系统内部代号 → 界面显示名；没收录的直接显示代号，不至于空白 */
@@ -87,43 +89,71 @@ export function captureConfigOf(credentials) {
     .map((key) => ({ key, label: CREDENTIAL_LABELS[key] || key, required: false }))
 }
 
-/** 服务端扁平的影城行 → 界面要的 { id, name, children[] } 两级树 */
+/**
+ * 服务端「程序账号配置」行 → 界面要的 { id, name, children[] } 两级树。
+ *
+ * 数据源是 `GET /api/ticket-program-account-configs?includeUnconfigured=1&compact=1`：
+ * 一行 = 一个出票程序（program），一个程序可能覆盖多家影城（连锁，cinema_count > 1），
+ * `account_count / account_name / credential_status` 就是这个程序下配的账号。
+ * 左栏按 `system` 分组，`type` 是 h5 / mini（小程序），统一归一成界面认的 h5 / miniapp。
+ */
+export function accessTypeOf(row) {
+  const raw = String(row?.type || row?.access_type || row?.accessType || '').toLowerCase()
+  if (raw === 'h5') return 'h5'
+  if (raw === 'mini' || raw === 'miniapp' || raw === 'miniprogram' || raw === 'wx') return 'miniapp'
+  return raw
+}
+
 export function buildCinemaTree(rows) {
   const list = Array.isArray(rows) ? rows : []
   const groups = new Map()
-  for (const row of list) {
-    const systemCode = String(row.system || '').trim()
+  list.forEach((row, index) => {
+    const systemCode = String(row.system || row.program_key || row.runtime_system || '').trim()
     const groupId = systemCode || 'unknown'
     if (!groups.has(groupId)) {
       groups.set(groupId, { id: groupId, name: systemLabel(systemCode), children: [] })
     }
+    const programId = Number(row.program_id ?? 0)
     groups.get(groupId).children.push({
-      id: row.id,
-      name: row.name || '',
-      code: row.standard_id || '',
-      city: row.city || '',
+      // program_id 一定在；账号配置 id 只有配过账号才有，不能当主键
+      id: programId || Number(row.id ?? row.account_id ?? 0) || index + 1,
+      programId,
+      name: row.name || row.program_name || '',
+      code: String(row.cinema_standard_ids || '').split(',')[0] || '',
+      city: row.city || row.cinema_cities || '',
       systemCode,
-      // 接入方式服务端没给，界面会显示成「—」
-      accessType: row.access_type || row.accessType || '',
-      captureConfig: captureConfigOf(row.credentials),
-      enabled: Number(row.enabled) === 1
+      accessType: accessTypeOf(row),
+      captureConfig: captureConfigOf(row.user_credentials || row.credentials),
+      enabled: Number(row.enabled) === 1,
+      accountId: row.account_name || '',
+      accountCount: Number(row.account_count) || 0,
+      // 账号直接随行带下去，界面不用为每个程序再走一次 IPC
+      accounts: accountsOf(row),
+      credentialStatus: row.credential_status || '',
+      cinemaCount: Number(row.cinema_count) || 1,
+      cinemaNames: Array.isArray(row.cinema_id_names)
+        ? row.cinema_id_names.map((c) => c.name).filter(Boolean)
+        : []
     })
-  }
+  })
   return [...groups.values()]
 }
 
 /**
- * 凭证挂在影城上（一个影城一套 credentials），界面按「一影城一行账号」渲染。
- * 注意：credentials 里主要是影城级参数（cinema_id / baseUrl / channel_code），
- * 账号级字段（mobile / token）只有叠加了 user_cinema_credentials 才出现，
- * 所以取不到手机号时会退回影城名。
+ * 一个程序 → 0 或 1 个出票账号。
+ *
+ * 新数据源里账号就挂在程序上：`account_count` 为 0 表示这个程序还没配账号
+ * （接口带 includeUnconfigured=1 时也会返回），界面按「无账号」渲染一行。
  */
 export function accountsOf(row) {
   if (!row) return []
+  const count = Number(row.account_count) || 0
+  const accountName = String(row.account_name || '').trim()
+  if (!count && !accountName) return []
   return [
     {
-      id: row.id,
-      accountId: accountNameOf(row.credentials, row.name),
+      id: row.account_id ?? row.id ?? row.program_id,
+      accountId: accountName || accountNameOf(row.user_credentials || row.credentials, ''),
       status: Number(row.enabled) === 1 ? 1 : 0,
       tokenStatus: tokenStatusOf(row.credential_status),
       priority: 0,

@@ -33,11 +33,11 @@ const activeSystem = computed(() => tree.value.find((s) => s.id === activeSystem
 
 const cinemas = computed(() => activeSystem.value?.children || [])
 
-/** 归一化接入方式：accessType 是 h5 / miniapp，个别数据只有 protocol */
+/** 归一化接入方式：accessType 是 h5 / miniapp（服务端可能给 mini），个别数据只有 protocol */
 function typeOf(cinema) {
   const raw = String(cinema?.accessType || cinema?.protocol || '').toLowerCase()
   if (raw === 'h5') return 'h5'
-  if (raw === 'miniapp' || raw === 'miniprogram' || raw === 'wx') return 'miniapp'
+  if (raw === 'miniapp' || raw === 'mini' || raw === 'miniprogram' || raw === 'wx') return 'miniapp'
   return ''
 }
 
@@ -160,6 +160,15 @@ async function loadTree() {
     }
     tree.value = res.tree || []
     autoRenew.value = res.autoRenew || {}
+    // 新数据源把账号挂在程序上，树里已经带下来了：一次性灌进 accountsMap，
+    // 避免几百个程序各走一次 IPC（也避免逐条响应触发整表重渲染）
+    const seeded = {}
+    for (const group of tree.value) {
+      for (const node of group.children || []) {
+        if (Array.isArray(node.accounts)) seeded[node.id] = node.accounts
+      }
+    }
+    if (Object.keys(seeded).length) accountsMap.value = seeded
     if (!tree.value.some((s) => s.id === activeSystemId.value)) {
       activeSystemId.value = tree.value[0]?.id || 0
     }
