@@ -9,27 +9,99 @@
  * 一行 = 一个出票程序，账号挂在程序上。
  */
 
-/** 出票系统内部代号 → 界面显示名；没收录的直接显示代号，不至于空白 */
-export const SYSTEM_LABELS = {
-  hkticketing: 'HK 票务',
-  phoenix: '凤凰',
-  'phoenix-mini': '凤凰小程序',
-  jingyu: '鲸鱼',
-  huiyingpiao: '慧影票',
-  guoyu: '国宇',
-  oristar: '奥映',
-  pandora: '潘多拉',
-  yingyuan360: '影院360',
-  laiyipiao: '来一票',
-  imovie365: 'IMovie365',
-  sgycyk: '省广影城',
-  'cx-v1': '晨星 V1',
-  'cx-v3': '晨星 V3',
-  'cx-v104': '晨星 V104',
-  'cx-middleground': '晨星中台',
-  'mini-v1': '小程序 V1',
-  'mini-v2': '小程序 V2'
+/**
+ * 出票系统字典（照抄后台前端的 `Fp` 常量）。
+ *
+ * 顺序就是左栏的展示顺序 —— 后台维护的这套顺序更像运营脑子里的顺序，
+ * 比自己按字母或按数量排更稳（数量每天变，顺序会跳）。
+ * 列表里有但库里暂时没数据的系统不会被渲染出来，只在有程序时才出现。
+ */
+export const SYSTEM_CATALOG = [
+  { label: '星辰印象', value: 'xingchen-yinxiang' },
+  { label: '爱电影网H5（券）', value: 'imovie-h5' },
+  { label: '影伴系统', value: 'iyingban' },
+  { label: '凤凰云智', value: 'phoenix' },
+  { label: '凤凰云智小程序', value: 'phoenix-mini' },
+  { label: '凤凰佳影', value: 'phoenix-jiaying' },
+  { label: '来一票', value: 'laiyipiao' },
+  { label: '奥映', value: 'oristar' },
+  { label: '辰星系统', value: 'cx-family' },
+  { label: 'MiniTicket系统', value: 'mini-family' },
+  { label: '365系统', value: 'imovie365-family' },
+  { label: '随映系统', value: 'sgycyk' },
+  { label: '光影系统', value: 'guangying-family' },
+  { label: '360系统', value: 'yingyuan360' },
+  { label: '惠影票', value: 'huiyingpiao' },
+  { label: '潘多拉系统', value: 'pandora' },
+  { label: '鲸鱼系统', value: 'jingyu' },
+  { label: '1905系统', value: 'movie1905' },
+  { label: '影联系统', value: 'paimeng' },
+  { label: '睿自由系统', value: 'ruiziyou' },
+  { label: '鬣狗系统', value: 'liegou' },
+  { label: '万花筒系统', value: 'wanhuatong' },
+  { label: '兜有系统', value: 'douyou' },
+  { label: '金淘淘系统', value: 'jintaotao' },
+  { label: '乐影系统', value: 'leying' },
+  { label: '重明鸟系统', value: 'chongmingniao' },
+  { label: '最美系统（券）', value: 'zmax' },
+  { label: '深圳纵横系统', value: 'zone-sz' },
+  { label: '文创', value: 'wenchuang' },
+  { label: '文投影业', value: 'wentou' },
+  { label: '博纳小程序', value: 'bona-dxds' },
+  { label: '映前系统', value: 'yq30' },
+  { label: '卢米埃', value: 'lumiere' },
+  { label: '吉木同', value: 'jmtnt' },
+  { label: '重明鸟3.0', value: 'chongmingniao-v3' }
+]
+
+/**
+ * 原始代号 → 字典 value（后台的 `Lp` 别名表）。
+ *
+ * 同一套出票系统的多个版本/分支算一类：cx-2 / cx-v1 / cx-v3 / cx-v104 / cx-middleground
+ * 都归到「辰星系统」，否则左栏会被版本号切成一堆两三家的碎片。
+ * 注意：只影响**分组和显示名**，程序行上的 `systemCode` 仍是原始代号 ——
+ * 抓包规则是按原始 id 匹配的（`ctx.extractor.activeRules`），不能替换。
+ */
+export const SYSTEM_ALIASES = {
+  'cx-2': 'cx-family',
+  'cx-v1': 'cx-family',
+  'cx-v3': 'cx-family',
+  'cx-v104': 'cx-family',
+  'cx-middleground': 'cx-family',
+  blwh: 'cx-family',
+  'mini-v1': 'mini-family',
+  'mini-v2': 'mini-family',
+  'mini-xxxshdz': 'mini-family',
+  imovie365: 'imovie365-family',
+  'imovie365-sdgj': 'imovie365-family',
+  guoyu: 'guangying-family',
+  'xiangsu-zhongying': 'guangying-family'
 }
+
+const CATALOG_LABEL = new Map(SYSTEM_CATALOG.map((item) => [item.value, item.label]))
+const CATALOG_ORDER = new Map(SYSTEM_CATALOG.map((item, index) => [item.value, index]))
+
+/** 原始代号 → 字典分组 key；查不到就小写原样返回，保证不同写法也能合并 */
+export function systemKeyOf(code) {
+  const raw = String(code || '').trim()
+  if (!raw) return ''
+  const lower = raw.toLowerCase()
+  return SYSTEM_ALIASES[raw] || SYSTEM_ALIASES[lower] || lower
+}
+
+/** 分组 key → 展示名；字典里没有的直接显示原始代号，不至于空白 */
+export function systemLabel(code) {
+  const raw = String(code || '').trim()
+  if (!raw) return '未指定系统'
+  return CATALOG_LABEL.get(systemKeyOf(raw)) || raw
+}
+
+/** 左栏排序用：字典里的按下标，字典外的排最后 */
+export function systemOrderOf(code) {
+  const index = CATALOG_ORDER.get(systemKeyOf(code))
+  return index === undefined ? Number.MAX_SAFE_INTEGER : index
+}
+
 
 /** credentials 里的字段名 → 中文显示名（参数弹窗第一列） */
 export const CREDENTIAL_LABELS = {
@@ -59,12 +131,6 @@ export const CREDENTIAL_LABELS = {
   tenant_id: '租户 ID',
   channelCode: '渠道编码',
   channel_code: '渠道编码'
-}
-
-export function systemLabel(code) {
-  const key = String(code || '').trim()
-  if (!key) return '未指定系统'
-  return SYSTEM_LABELS[key] || SYSTEM_LABELS[key.toLowerCase()] || key
 }
 
 /** 服务端 credential_status：只有 'valid' 算有效，其余（expired / unknown / 空）都算无效 */
@@ -109,12 +175,13 @@ export function buildCinemaTree(rows) {
   const groups = new Map()
   list.forEach((row, index) => {
     const systemCode = String(row.system || row.program_key || row.runtime_system || '').trim()
-    const groupId = systemCode || 'unknown'
-    if (!groups.has(groupId)) {
-      groups.set(groupId, { id: groupId, name: systemLabel(systemCode), children: [] })
+    // 分组按字典归并（cx-* → 辰星系统），行上的 systemCode 保留原始代号给抓包用
+    const groupKey = systemKeyOf(systemCode) || 'unknown'
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, { id: groupKey, name: systemLabel(systemCode), children: [] })
     }
     const programId = Number(row.program_id ?? 0)
-    groups.get(groupId).children.push({
+    groups.get(groupKey).children.push({
       // program_id 一定在；账号配置 id 只有配过账号才有，不能当主键
       id: programId || Number(row.id ?? row.account_id ?? 0) || index + 1,
       programId,
@@ -122,6 +189,7 @@ export function buildCinemaTree(rows) {
       code: String(row.cinema_standard_ids || '').split(',')[0] || '',
       city: row.city || row.cinema_cities || '',
       systemCode,
+      systemKey: groupKey,
       accessType: accessTypeOf(row),
       captureConfig: captureConfigOf(row.user_credentials || row.credentials),
       enabled: Number(row.enabled) === 1,
@@ -136,7 +204,11 @@ export function buildCinemaTree(rows) {
         : []
     })
   })
-  return [...groups.values()]
+  // 按字典顺序排；字典外的排最后，按程序数多的在前，免得碎片沉在列表底下看不见
+  return [...groups.values()].sort(
+    (a, b) =>
+      systemOrderOf(a.id) - systemOrderOf(b.id) || b.children.length - a.children.length
+  )
 }
 
 /**
