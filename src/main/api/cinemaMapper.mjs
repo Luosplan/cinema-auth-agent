@@ -174,19 +174,19 @@ export function accessTypeOf(row) {
 export function buildCinemaTree(rows) {
   const list = Array.isArray(rows) ? rows : []
   const groups = new Map()
-  /** programId → 节点：接口是「一个账号一行」，同一程序会重复出现，必须合并 */
+  /**
+   * programId → 节点：接口是「一个账号一行」，同一程序会重复出现，必须合并。
+   * 停用的程序也照原样进树：后台左栏的口径是「全部程序」（凤凰云智 18 个里含 3 个停用），
+   * 少算它们就会和后台对不上；这些行本来没有账号，界面按「未配置出票账号」渲染。
+   */
   const nodes = new Map()
   list.forEach((row, index) => {
-    // 停用的程序不展示也不计数：后台停用 = 当前不可用，混进列表会把可用程序数撑大
-    if (Number(row.enabled) === 0) return
     /**
      * 分组以「实际跑的系统」为准，不是配置里登记的那个。
      * 例：大连麦凯乐泊林影城 `system=phoenix`，但 `runtime_system=program_key=jintaotao`，
      * 出票实际走的是金淘淘 —— 按 system 分组会把它塞进凤凰云智（用户实测反馈过）。
      */
-    const systemCode = String(
-      row.runtime_system || row.program_key || row.system || ''
-    ).trim()
+    const systemCode = String(row.runtime_system || row.program_key || row.system || '').trim()
     // 分组按字典归并（cx-* / oristar → 辰星系统），行上的 systemCode 保留原始代号给抓包用
     const groupKey = systemKeyOf(systemCode) || 'unknown'
     const programId = Number(row.program_id ?? 0)
