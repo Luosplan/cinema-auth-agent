@@ -218,9 +218,45 @@ routers.push(
 
     if (!ctx.proxyRunning) {
       try {
-        await ctx.startProxy()
+        const started = await ctx.startProxy()
+        /**
+         * startProxy 被证书闸拦下时是 **return 而不是 throw**，这里必须看返回值：
+         * 不然代理没起来、系统代理没设，下面的循环照样等满 45 秒，最后回 0 个值，
+         * 用户只会以为「抓包功能坏了」。
+         */
+        if (!ctx.proxyRunning) {
+          return { ok: false, message: started?.error || '抓包代理没能启动，请重试' }
+        }
       } catch (e) {
         return { ok: false, message: `抓包代理启动失败：${e.message}` }
+      }
+    }
+
+    /**
+     * 系统代理有没有被别人抢走。
+     *
+     * 现实里最常见的就是 Clash / V2Ray 开着「系统代理」：它会把注册表整份重写成自己的地址
+     * （例如 127.0.0.1:7897），采集助手的 9090 还在跑，但浏览器一条流量都不经过它 ——
+     * 表现就是「点了获取参数，等了半天一个值都没抓到」。
+     * 这里先抢一次回来，抢不回来就立刻失败并说清楚，别让人白等 45 秒。
+     */
+    const port = ctx.proxy.port
+    let sys = await ctx.systemProxy.verify(port).catch(() => ({ ok: true }))
+    // 回读失败（PowerShell 抖动）不能当成「被抢走」，否则会误报把人劝退
+    if (sys.error) sys = { ok: true }
+    if (!sys.ok) {
+      await ctx.systemProxy.reapply(port).catch(() => {})
+      sys = await ctx.systemProxy.verify(port)
+      if (!sys.ok) {
+        const actual = sys.actual || '（未设置）'
+        return {
+          ok: false,
+          hijacked: true,
+          message:
+            `系统代理当前指向 ${actual}，不是采集助手（127.0.0.1:${port}），` +
+            '浏览器流量没经过这里，所以抓不到任何内容。' +
+            '请关掉 Clash / VPN 之类软件的「系统代理」开关后再点「获取参数」'
+        }
       }
     }
 
@@ -254,6 +290,13 @@ routers.push(
       const waitMs = Math.min(Math.max(Number(params.waitMs) || 20000, 3000), 60000)
       const deadline = Date.now() + waitMs
       let stopped = false
+      /**
+       * 窗口内看住系统代理：Clash 这类工具是随时可能重写配置的（用户去点一下开关就没了），
+       * 所以抓包期间每 5 秒回读一次，被改走就抢回来。
+       * 最多抢 3 次 —— 跟一个反复争夺的软件死磕没有意义，日志里说明就行。
+       */
+      let lastSysCheck = Date.now()
+      let reasserts = 0
       while (keys.some((key) => !values[key]) && Date.now() < deadline) {
         if (ctx.captureStop) {
           stopped = true
@@ -261,6 +304,16 @@ routers.push(
         }
         await new Promise((resolve) => setTimeout(resolve, 700))
         scanNew()
+
+        if (Date.now() - lastSysCheck >= 5000) {
+          lastSysCheck = Date.now()
+          const now = await ctx.systemProxy.verify(port).catch(() => ({ ok: true }))
+          if (!now.ok && !now.error && reasserts < 3) {
+            reasserts += 1
+            await ctx.systemProxy.reapply(port).catch(() => {})
+            api.log('warn', `系统代理被改回 ${now.actual || '空'}，已重新接管（第 ${reasserts} 次）`)
+          }
+        }
       }
       // 停止或超时前最后扫一遍：跳出循环到返回之间可能刚好有新流量进来
       scanNew()

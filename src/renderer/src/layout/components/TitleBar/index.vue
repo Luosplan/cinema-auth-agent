@@ -40,7 +40,11 @@ let offWindowState = null
 async function doToggle() {
   const res = await toggleProxy()
   if (!res) return null
-  if (!res.error) ElMessage.success(res.running ? '采集已启动' : '采集已停止')
+  if (!res.error) {
+    ElMessage.success(res.running ? '采集已启动' : '采集已停止')
+    // 系统代理被 Clash / VPN 抢走：采集开着也收不到流量，这句话必须让人看见
+    if (res.warning) ElMessage.warning({ message: res.warning, duration: 8000 })
+  }
   return res
 }
 

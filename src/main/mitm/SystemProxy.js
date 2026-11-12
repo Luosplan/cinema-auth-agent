@@ -163,6 +163,42 @@ export default class SystemProxy {
   }
 
   /**
+   * 系统代理现在还归我们吗？
+   *
+   * 必须实际回读注册表，不能假设 enable() 之后就一直是我们的：
+   * Clash / V2Ray 这类工具会在开启「系统代理」时把整份配置重写成自己的地址，
+   * 用户开一次 Clash 就能把采集助手顶掉 —— 代理在 9090 上白跑，浏览器全走 Clash 直出，
+   * 表现就是「点了获取参数，等了半天一个值都没有」。
+   *
+   * @returns {{ ok: boolean, enabled: boolean, actual: string, autoConfigUrl: string }}
+   */
+  async verify(port) {
+    const now = await this.read()
+    if (now.error) return { ok: false, enabled: false, actual: '', autoConfigUrl: '', error: now.error }
+
+    const actual = String(now.proxyServer || '')
+    const enabled = Number(now.proxyEnable) === 1
+    const autoConfigUrl = String(now.autoConfigUrl || '')
+    // 有的客户端只认 server 里的端口，比整串更耐操（可能写成 http=127.0.0.1:9090;https=...）
+    const ok = enabled && actual.includes(`:${port}`) && !autoConfigUrl
+    return { ok, enabled, actual, autoConfigUrl }
+  }
+
+  /**
+   * 重新写一遍代理设置，但**不动 backup**。
+   * 用于捕获窗口内被别的软件抢走时把系统代理抢回来 —— 走 enable() 会顺手重新备份，
+   * 备份到的是抢走者写的地址，反而把用户原本的配置弄丢。
+   */
+  async reapply(port) {
+    this.port = port
+    if (this.platform === 'win32') await this.enableWindows(port)
+    else if (this.platform === 'darwin') await this.enableMac(port)
+    else await this.enableLinux(port)
+    this.active = true
+    return { port }
+  }
+
+  /**
    * 用外部备份还原。用于崩溃恢复：进程上次被强杀时内存里的备份已经丢了，
    * 只能靠启动时从 lock 文件里读回来。
    */

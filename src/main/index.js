@@ -254,11 +254,40 @@ async function startProxy() {
   const actualPort = await ctx.proxy.start(port)
   await ctx.systemProxy.enable(actualPort)
 
+  /**
+   * 回读确认系统代理确实是我们的。
+   *
+   * Clash / V2Ray 这类工具开着「系统代理」时会重写整份注册表配置，
+   * 把我们刚写进去的 127.0.0.1:9090 顶回它自己的地址。这时代理在跑、界面显示「采集中」，
+   * 但浏览器一条流量都不经过这里 —— 用户只会觉得「抓包坏了」。
+   * 先抢一次，抢不回来就把结论带回去，让界面立刻提示，而不是等抓了 45 秒发现 0 个值。
+   */
+  let hijacked = ''
+  let sys = await ctx.systemProxy.verify(actualPort).catch(() => ({ ok: true }))
+  // 回读失败不算被抢走，别把一次 PowerShell 抖动说成「代理被占用」
+  if (sys.error) sys = { ok: true }
+  if (!sys.ok) {
+    await ctx.systemProxy.reapply(actualPort).catch(() => {})
+    sys = await ctx.systemProxy.verify(actualPort).catch(() => ({ ok: true }))
+    if (!sys.ok) hijacked = sys.actual || '（未设置）'
+  }
+  if (hijacked) {
+    log('warn', `系统代理当前为 ${hijacked}，不是本机的 127.0.0.1:${actualPort}，抓包收不到流量`)
+  }
+
   ctx.proxyRunning = true
   writeLock(actualPort)
   log('info', `采集已启动，系统代理指向 127.0.0.1:${actualPort}`)
   updateTrayMenu()
-  return { running: true, port: actualPort }
+  return {
+    running: true,
+    port: actualPort,
+    hijacked,
+    warning: hijacked
+      ? `采集已启动，但系统代理指向 ${hijacked}，浏览器流量没经过本程序。` +
+        '请关掉 Clash / VPN 之类软件的「系统代理」开关，否则抓不到任何参数'
+      : ''
+  }
 }
 
 async function stopProxy() {
