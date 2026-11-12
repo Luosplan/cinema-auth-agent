@@ -221,6 +221,7 @@ async function openParam(cinema) {
   paramFields.value = []
   paramValues.value = {}
   paramAccounts.value = []
+  captureReason.value = ''
   paramDialog.value = true
   await loadParamFields(cinema)
 }
@@ -299,6 +300,8 @@ const paramLoading = ref(false)
 const capturing = ref(false)
 /** 点了停止、等主进程把已抓到的值带回来：按钮要禁用，避免连点 */
 const stopping = ref(false)
+/** 上一轮没抓齐时，主进程给的一句原因（没流量 / 没登录 / 字段名不同） */
+const captureReason = ref('')
 
 const paramAccountText = computed(
   () =>
@@ -333,6 +336,7 @@ async function captureParams() {
   }
 
   capturing.value = true
+  captureReason.value = ''
   try {
     const res = await invoke('cinemas:capture-params', {
       keys,
@@ -353,6 +357,7 @@ async function captureParams() {
 
     const values = res.values || {}
     paramValues.value = { ...paramValues.value, ...values }
+    captureReason.value = res.reason || ''
     const got = Object.keys(values).length
 
     /**
@@ -375,9 +380,11 @@ async function captureParams() {
     }
 
     if (!got) {
-      ElMessage.warning('这次没有抓到数据，请在「抓包日志」里确认有该系统的请求')
+      ElMessage.warning(res.reason || '这次没有抓到数据，请在「抓包日志」里确认有该系统的请求')
     } else if (res.missing?.length) {
-      ElMessage.warning(`已获取 ${got} 个参数，${res.missing.length} 个还没抓到`)
+      ElMessage.warning(
+        res.reason || `已获取 ${got} 个参数，${res.missing.length} 个还没抓到`
+      )
     } else {
       ElMessage.success(`已获取 ${got} 个参数`)
     }
@@ -667,6 +674,8 @@ onMounted(async () => {
           正在抓包（只解密该系统的域名，其余流量照常直通）。现在切到浏览器刷新该系统的页面并完成登录，
           抓到的值会自动回填；已经抓到了就点「停止」，不用等满时间。
         </div>
+        <!-- 没抓齐时只留一句原因：没流量 / 没登录 / 字段名不同，处理办法完全不同 -->
+        <div v-if="!capturing && captureReason" class="p-hint">{{ captureReason }}</div>
       </div>
 
       <template #footer>

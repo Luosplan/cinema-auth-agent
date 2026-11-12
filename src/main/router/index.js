@@ -401,18 +401,16 @@ routers.push(
       const missing = required.filter((key) => !values[key])
       const complete = missing.length === 0
 
+      let reason = ''
       if (missing.length) {
-        if (focus.size && !accepted.length) {
-          /**
-           * 一个值都没抓到且一条记录都没有：多半是这套系统的域名族登记得不对，
-           * 或者页面压根没打开。日志里点明，比「没抓到」有用。
-           */
-          api.log(
-            'warn',
-            `本期没收到 ${[...focus].join('、')} 的任何流量（可能域名表要更新，或页面还没刷新）`
-          )
-        }
-        api.log('warn', `抓包未凑齐：缺 ${missing.join('、')}（命中记录 ${accepted.length} 条）`)
+        reason = diagnoseMiss(accepted, focus)
+        api.log(
+          'warn',
+          `抓包未凑齐：缺 ${missing.join('、')}（命中记录 ${accepted.length} 条）` +
+            (reason ? `｜${reason}` : '')
+        )
+        const file = dumpMiss(ctx, systemCode, required, values, accepted)
+        if (file) api.log('warn', `抓包诊断已写入 ${file}（需要排查时把这个文件发出来）`)
       } else {
         api.log('info', `必填参数已抓齐（${required.join('、')}），自动停止抓包`)
       }
@@ -423,6 +421,8 @@ routers.push(
         missing,
         // 必填全部到手：界面据此提示「已自动停止」，不是超时失败
         complete,
+        // 没抓齐时的一句话原因：是没流量、没登录，还是字段名对不上
+        reason,
         hints: missing.length ? { ...describeTraffic(accepted), scope: [...focus] } : null,
         // 用户点了「停止」而不是等满窗口：界面提示要说「保留已抓到的」，不算失败
         stopped,
@@ -786,5 +786,112 @@ routers.push(
     return { maximized: Boolean(win && win.isMaximized()) }
   })
 )
+
+/**
+ * 没抓齐时，判断到底卡在哪一步，只回一句人话。
+ *
+ * 「没抓到」这三种原因的处理方式完全不同，不区分就只能让用户反复重试：
+ *   1. 一条请求都没有 → 页面没刷新，或系统代理没生效；
+ *   2. 有请求但没有登录请求 → 用户是在点「获取参数」**之前**登录的，流量早过去了；
+ *   3. 有登录请求但字段没对上 → 字段名不同，要靠诊断文件看真实报文。
+ */
+function diagnoseMiss(accepted, focus) {
+  if (!accepted.length) {
+    const scope = focus && focus.size ? [...focus].join('、') : ''
+    return scope
+      ? `本次没有收到 ${scope} 的任何请求：页面可能还没刷新，或系统代理没生效`
+      : '本次没有收到任何请求：页面可能还没刷新，或系统代理没生效'
+  }
+  if (!accepted.some(looksLikeLogin)) {
+    return `本次收到 ${accepted.length} 条请求，但里面没有登录请求 —— 请先在浏览器里退出登录，再点登录`
+  }
+  return `登录请求已经抓到，但这几个字段不在里面（字段名可能不同），诊断文件里有原始报文`
+}
+
+/** 表单里的 JSON 是 URL 编码的，判断前先解一层 */
+function safeDecode(text) {
+  const raw = String(text || '')
+  if (!raw.includes('%')) return raw
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    return raw
+  }
+}
+
+/** 这条记录像不像登录：请求体里出现 loginId / password，或响应里带出真实的 larkSid */
+function looksLikeLogin(record) {
+  const text = `${safeDecode(record.reqBody)} ${record.resBody || ''}`
+  return /loginid|"password"|password=|larksid"\s*:\s*"[^"]{6,}|mobile"\s*:\s*"1\d{10}/i.test(text)
+}
+
+function maskSecret(text) {
+  return String(text || '')
+    .replace(/("?(?:password|pwd|passwd)"?\s*[:=]\s*"?)[^"&,\s]{2,}/gi, '$1***')
+    .replace(/(password|pwd)=[^&\s]{2,}/gi, '$1=***')
+}
+
+function clip(text, max) {
+  const value = String(text || '')
+  return value.length > max ? `${value.slice(0, max)}…（共 ${value.length} 字符）` : value
+}
+
+function headerNames(headers, name) {
+  if (!headers) return ''
+  const key = Object.keys(headers).find((k) => k.toLowerCase() === name)
+  if (!key) return ''
+  const raw = headers[key]
+  const list = Array.isArray(raw) ? raw : [String(raw)]
+  return list
+    .join(';')
+    .split(/[;,]/)
+    .map((part) => String(part).split('=')[0].trim())
+    .filter(Boolean)
+    .slice(0, 30)
+    .join(',')
+}
+
+/**
+ * 把本次命中的记录落一份诊断文件。
+ *
+ * 为什么落到文件而不是弹窗：用户明确不要界面上摆调试信息，
+ * 但这几种「抓不到」光看日志真定位不了（字段名、编码层级、请求体形状都要看原文）。
+ * 只写本地数据目录，含密码的字段做脱敏。
+ */
+function dumpMiss(ctx, systemCode, required, values, accepted) {
+  try {
+    const dir = join(ctx.dataDir, 'diagnostics')
+    fs.mkdirSync(dir, { recursive: true })
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const file = join(dir, `capture-miss-${stamp}.json`)
+    const records = (accepted || []).slice(-40).map((r) => ({
+      host: r.host,
+      method: r.method,
+      path: clip(r.path, 300),
+      reqBody: clip(maskSecret(r.reqBody), 2000),
+      resBody: clip(maskSecret(r.resBody), 2000),
+      cookieNames: headerNames(r.reqHeaders, 'cookie'),
+      setCookieNames: headerNames(r.resHeaders, 'set-cookie')
+    }))
+    fs.writeFileSync(
+      file,
+      JSON.stringify(
+        {
+          at: new Date().toISOString(),
+          systemCode,
+          required,
+          values,
+          recordCount: records.length,
+          records
+        },
+        null,
+        2
+      )
+    )
+    return file
+  } catch {
+    return ''
+  }
+}
 
 export default routers
