@@ -30,6 +30,11 @@ const COLS = ['33%', '10%', '22%', '8%', '8%', '16%']
 
 const activeSystem = computed(() => tree.value.find((s) => s.id === activeSystemId.value) || null)
 
+/**
+ * 当前系统的表格行：主进程已按「一行一个影城」摊开。
+ * 一个连锁程序一套账号管多家影城（重明鸟3.0 管骏维、中影数字两家），
+ * 只在程序维度列就会少行，跟后台对不上。
+ */
 const cinemas = computed(() => activeSystem.value?.children || [])
 
 /** 归一化接入方式：accessType 是 h5 / miniapp（服务端可能给 mini），个别数据只有 protocol */
@@ -41,7 +46,7 @@ function typeOf(cinema) {
 }
 
 const filteredCinemas = computed(() => {
-  // 只按影城名搜：编码和账号另有筛选口径，塞进同一个输入框反而不好预期
+  // 影城名和程序名都能搜：运营嘴上说的是「沈阳正播」这种程序名
   const kw = keyword.value.trim().toLowerCase()
   return cinemas.value.filter((c) => {
     if (typeFilter.value && typeOf(c) !== typeFilter.value) return false
@@ -49,7 +54,7 @@ const filteredCinemas = computed(() => {
     if (accountFilter.value === 'has' && !n) return false
     if (accountFilter.value === 'none' && n) return false
     if (!kw) return true
-    return String(c.name || '').toLowerCase().includes(kw)
+    return `${c.displayName || ''} ${c.programName || ''}`.toLowerCase().includes(kw)
   })
 })
 
@@ -58,9 +63,17 @@ const hasFilter = computed(
   () => !!accountFilter.value || !!typeFilter.value || !!keyword.value.trim()
 )
 
-const totalAccounts = computed(() =>
-  cinemas.value.reduce((sum, c) => sum + (accountsMap.value[c.id]?.length || 0), 0)
-)
+/** 账号数按**程序**去重：摊成影城行后同一程序会出现多次，逐行相加会把共用的账号算两遍 */
+const totalAccounts = computed(() => {
+  const seen = new Set()
+  let sum = 0
+  for (const row of cinemas.value) {
+    if (seen.has(row.id)) continue
+    seen.add(row.id)
+    sum += accountsMap.value[row.id]?.length || 0
+  }
+  return sum
+})
 
 /** 一个影城可能是 0 个、2 个、3 个账号：行数取账号数，没有账号也占一行看空态 */
 function rowsOf(cinema) {
@@ -82,6 +95,8 @@ function countOf(cinema) {
 }
 
 function metaText(cinema) {
+  // 一套账号管多家影城：如实写「账号与 N 家共用」，否则同一条账号出现在两行像是配错了
+  if ((cinema.sharedCount || 1) > 1) return `账号与 ${cinema.sharedCount} 家共用`
   const n = countOf(cinema)
   if (n) return `${n} 个账号`
   return accountsLoading.value ? '读取中…' : '无账号'
@@ -111,7 +126,7 @@ async function writeClipboard(text) {
 
 /** 数量右边的复制按钮：复制的是影城名称，不是账号列表 */
 async function copyCinemaName(cinema) {
-  const name = String(cinema?.name || '').trim()
+  const name = String(cinema?.displayName || '').trim()
   if (!name) {
     ElMessage.warning('该影城没有名称')
     return
@@ -328,10 +343,11 @@ watch(activeSystemId, () => {
 /**
  * 底部状态栏要显示当前系统的规模。数据本来就只在这里加载，
  * 算完顺手写进 store，别让状态栏自己再拉一遍 tree + 账号。
+ * 这里给的是**程序数**：children 已按影城摊开，直接用长度会把共用的影城多算一遍。
  */
 watch(
-  [cinemas, totalAccounts],
-  ([list, accounts]) => setCinemaStats(list.length, accounts),
+  [activeSystem, totalAccounts],
+  ([sys, accounts]) => setCinemaStats(sys?.programCount || 0, accounts),
   { immediate: true }
 )
 
@@ -431,7 +447,7 @@ onMounted(async () => {
               @keyup.enter="activeSystemId = sys.id"
             >
               <span class="sys-name">{{ sys.name }}</span>
-              <span class="sys-count">{{ sys.children?.length || 0 }}</span>
+              <span class="sys-count">{{ sys.programCount || 0 }}</span>
             </div>
           </div>
         </aside>
@@ -453,10 +469,12 @@ onMounted(async () => {
               </tr>
             </thead>
             <tbody>
-              <template v-for="cinema in filteredCinemas" :key="cinema.id">
-                <tr v-for="(acc, idx) in rowsOf(cinema)" :key="`${cinema.id}-${idx}`">
+              <template v-for="cinema in filteredCinemas" :key="cinema.rowKey">
+                <tr v-for="(acc, idx) in rowsOf(cinema)" :key="`${cinema.rowKey}-${idx}`">
                   <td v-if="idx === 0" :rowspan="rowsOf(cinema).length" class="cinema-cell">
-                    <div class="cinema-name" :title="cinema.name">{{ cinema.name }}</div>
+                    <div class="cinema-name" :title="cinema.displayName">
+                      {{ cinema.displayName }}
+                    </div>
                     <div class="cinema-meta">
                       <span>{{ metaText(cinema) }}</span>
                       <button

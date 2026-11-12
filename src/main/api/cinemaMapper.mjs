@@ -231,10 +231,45 @@ export function buildCinemaTree(rows) {
     if (!node.accountId && row.account_name) node.accountId = row.account_name
     node.accountCount = Math.max(node.accountCount, node.accounts.length)
   })
+  // 程序数单独留一份：children 之后会被摊成「一行一个影城」，左栏那个数字要的还是程序数
+  for (const group of groups.values()) group.programCount = group.children.length
   // 按字典顺序排；字典外的排最后，按程序数多的在前，免得碎片沉在列表底下看不见
   return [...groups.values()].sort(
     (a, b) => systemOrderOf(a.id) - systemOrderOf(b.id) || b.children.length - a.children.length
   )
+}
+
+/**
+ * 程序 → 影城行：表格一行放一个影城。
+ *
+ * 一个程序可能覆盖多家影城（连锁 / 分店共用一套账号，接口里 `cinema_count > 1`），
+ * 后台左栏是按影城逐条铺开的 —— 只出一行就会少算（「重明鸟3.0」管着骏维影城、
+ * 中影数字影城两家，后台列 2 条，我们列 1 条，加起来就从 6 变 5 了）。
+ *
+ * 名称跟后台一致：只覆盖 1 家的程序用**程序名**（如「沈阳正播」，它的影城叫
+ * 正播国际影城（全激光厅），运营认的是程序名）；覆盖多家的才拆成**影城名**，
+ * 否则两行会同名，看不出区别。
+ */
+export function expandProgramToCinemas(programs) {
+  const list = Array.isArray(programs) ? programs : []
+  const rows = []
+  for (const node of list) {
+    const names = Array.isArray(node?.cinemaNames) ? node.cinemaNames.filter(Boolean) : []
+    const cinemas = names.length ? names : [node?.name || '']
+    const shared = cinemas.length > 1
+    cinemas.forEach((name, index) => {
+      rows.push({
+        ...node,
+        // 同一个程序会摊成多行，行 key 不能再用程序 id
+        rowKey: `${node.id}-${index}`,
+        cinemaName: name || '',
+        programName: node.name || '',
+        displayName: shared ? name || node.name || '' : node.name || name || '',
+        sharedCount: cinemas.length
+      })
+    })
+  }
+  return rows
 }
 
 /**

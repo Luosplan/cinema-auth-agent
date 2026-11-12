@@ -4,7 +4,12 @@ import { promisify } from 'node:util'
 import { join } from 'node:path'
 import fs from 'node:fs'
 import { pickValues } from '../collectors/ParamCollector.js'
-import { buildCinemaTree, accountsOf, cinemasOfProgram } from '../api/cinemaMapper.mjs'
+import {
+  buildCinemaTree,
+  expandProgramToCinemas,
+  accountsOf,
+  cinemasOfProgram
+} from '../api/cinemaMapper.mjs'
 
 const exec = promisify(execFile)
 const PS = ['-NoProfile', '-NonInteractive', '-Command']
@@ -65,10 +70,15 @@ routers.push(
       const list = Array.isArray(rows) ? rows : []
       // 缓存原始行，cinemas:accounts 直接按 program_id 取，不用重复请求
       api.ctx.serverCinemas = list
-      return {
-        ok: true,
-        tree: buildCinemaTree(list)
-      }
+      /**
+       * children 摊成「一行一个影城」：连锁程序一套账号管多家影城，后台也是逐家列的。
+       * 分组上的 programCount 保留程序数（左栏显示的那个数字不变）。
+       */
+      const tree = buildCinemaTree(list).map((group) => ({
+        ...group,
+        children: expandProgramToCinemas(group.children)
+      }))
+      return { ok: true, tree }
     } catch (e) {
       return { ok: false, message: e.message, status: e.status || 0 }
     }
