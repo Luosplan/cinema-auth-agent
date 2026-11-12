@@ -221,7 +221,6 @@ async function openParam(cinema) {
   paramFields.value = []
   paramValues.value = {}
   paramAccounts.value = []
-  paramAccountIdx.value = 0
   paramDialog.value = true
   await loadParamFields(cinema)
 }
@@ -236,7 +235,6 @@ async function loadParamFields(cinema) {
     }
     paramFields.value = Array.isArray(res.fields) ? res.fields : []
     paramAccounts.value = Array.isArray(res.accounts) ? res.accounts : []
-    paramAccountIdx.value = 0
   } catch (e) {
     ElMessage.error(e.message || '读取参数失败')
   } finally {
@@ -295,49 +293,24 @@ const DETAIL_WIDTHS = {
 const paramFields = ref([])
 /** 抓包抓到的值，key → value；打开弹窗是空的，点「获取参数」才填 */
 const paramValues = ref({})
-/** 接口里的出票账号（一个程序可能挂多个），每个带一套当前参数值 */
+/** 接口里的出票账号（一个程序可能挂多个），只取第一个用在标题和抓包系统上 */
 const paramAccounts = ref([])
-const paramAccountIdx = ref(0)
 const paramLoading = ref(false)
 const capturing = ref(false)
 
-const activeAccount = computed(() => paramAccounts.value[paramAccountIdx.value] || null)
-
-/** 右侧「当前账号」：接口给了就用接口的，没给就退回表格里的那一行 */
-const paramSide = computed(() => {
-  const cinema = dialogCinema.value
-  const row = activeAccount.value
-  const info = row?.info || {}
-  const acc = accountsMap.value[cinema?.id]?.[0] || null
-  const type = String(info.type || typeOf(cinema) || '').toLowerCase()
-  const status = String(info.credentialStatus || '').toLowerCase()
-  return {
-    account: row?.account || acc?.accountId || '—',
-    system: activeSystem.value?.name || cinema?.systemCode || '—',
-    accessType: type === 'h5' ? 'H5' : type ? '小程序' : '—',
-    cinemaCount: Number(info.cinemaCount) || cinema?.sharedCount || 1,
-    enabled: typeof info.enabled === 'boolean' ? info.enabled : isEnabled(acc),
-    valid: status ? status === 'valid' : isValid(acc),
-    checkedAt: info.checkedAt || acc?.lastSync || ''
-  }
-})
-
-/** 右侧「当前参数值」：接口里存的、这个账号现在用的值，和左边抓到的对着看 */
-const paramSideValues = computed(() => {
-  const values = activeAccount.value?.values || {}
-  return paramFields.value.map((field) => ({
-    key: field.key,
-    label: field.label,
-    value: values[field.key] || ''
-  }))
-})
+const paramAccountText = computed(
+  () =>
+    paramAccounts.value[0]?.account ||
+    accountsMap.value[dialogCinema.value?.id]?.[0]?.accountId ||
+    ''
+)
 
 /** 标题带上「哪个程序 + 哪套账号」：同一系统几十个程序，光看影城名容易搞混 */
 const paramTitle = computed(() => {
   const cinema = dialogCinema.value
   if (!cinema) return '影城参数'
   const name = cinema.programName || cinema.name || ''
-  const account = paramSide.value.account
+  const account = paramAccountText.value
   return account && account !== '—' ? `影城参数 · ${name}（${account}）` : `影城参数 · ${name}`
 })
 
@@ -358,7 +331,7 @@ async function captureParams() {
   try {
     const res = await invoke('cinemas:capture-params', {
       keys,
-      systemCode: activeAccount.value?.info?.system || cinema.systemCode || '',
+      systemCode: paramAccounts.value[0]?.info?.system || cinema.systemCode || '',
       waitMs: 25000
     })
     if (!res?.ok) {
@@ -600,116 +573,48 @@ onMounted(async () => {
 
     <LoginDialog v-model="loginOpen" @success="reload" />
 
-    <!-- 参数：左边是「要抓哪些字段」（值留空，靠抓包填），右边是当前账号信息做对比 -->
-    <el-dialog v-model="paramDialog" :title="paramTitle" width="760px" align-center>
-      <div v-if="dialogCinema" class="dlg param-dlg">
-        <div class="param-main">
-          <div v-if="paramFields.length" class="param-wrap">
-            <table class="param-table">
-              <thead>
-                <tr>
-                  <th class="p-name">参数名称</th>
-                  <th>参数值</th>
-                  <th class="p-required">是否必填</th>
-                  <th class="p-op-head">操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in paramFields" :key="row.key">
-                  <td :title="row.help || row.key">
-                    <div class="p-label">{{ row.label }}</div>
-                    <div v-if="row.help" class="p-help" :title="row.help">{{ row.help }}</div>
-                  </td>
-                  <td class="mono p-val" :title="paramValues[row.key] || ''">
-                    <span v-if="paramValues[row.key]">{{ paramValues[row.key] }}</span>
-                    <span v-else class="dim">待抓取</span>
-                  </td>
-                  <td class="p-required">
-                    <span v-if="row.required === true" class="p-yes">是</span>
-                    <span v-else-if="row.required === false" class="dim">否</span>
-                    <span v-else class="dim">—</span>
-                  </td>
-                  <td class="p-op">
-                    <button class="op-link" @click="copyParam(row)">复制</button>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <div v-else class="empty-cell">
-            {{ paramLoading ? '读取中…' : '该程序没有配置抓包参数' }}
-          </div>
-          <div v-if="capturing" class="p-hint">
-            正在抓包（这 25 秒内会临时解密本机 HTTPS，抓完立刻恢复）。请到该系统的 H5 /
-            小程序里登录一次，抓到值会自动回填…
-          </div>
+    <!-- 参数：只列要抓哪些字段，值留空靠抓包填 -->
+    <el-dialog v-model="paramDialog" :title="paramTitle" width="600px" align-center>
+      <div v-if="dialogCinema" class="dlg">
+        <div v-if="paramFields.length" class="param-wrap">
+          <table class="param-table">
+            <thead>
+              <tr>
+                <th class="p-name">参数名称</th>
+                <th>参数值</th>
+                <th class="p-required">是否必填</th>
+                <th class="p-op-head">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in paramFields" :key="row.key">
+                <td :title="row.help || row.key">
+                  <div class="p-label">{{ row.label }}</div>
+                  <div v-if="row.help" class="p-help" :title="row.help">{{ row.help }}</div>
+                </td>
+                <td class="mono p-val" :title="paramValues[row.key] || ''">
+                  <span v-if="paramValues[row.key]">{{ paramValues[row.key] }}</span>
+                  <span v-else class="dim">待抓取</span>
+                </td>
+                <td class="p-required">
+                  <span v-if="row.required === true" class="p-yes">是</span>
+                  <span v-else-if="row.required === false" class="dim">否</span>
+                  <span v-else class="dim">—</span>
+                </td>
+                <td class="p-op">
+                  <button class="op-link" @click="copyParam(row)">复制</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-
-        <aside class="param-side">
-          <div class="side-title">当前账号</div>
-          <!-- 一个程序挂多个出票账号时，这里切着看各自的当前参数值 -->
-          <el-select
-            v-if="paramAccounts.length > 1"
-            v-model="paramAccountIdx"
-            size="small"
-            class="acc-select"
-          >
-            <el-option
-              v-for="(item, i) in paramAccounts"
-              :key="item.id || i"
-              :label="item.account || `账号 ${i + 1}`"
-              :value="i"
-            />
-          </el-select>
-          <div v-if="paramAccounts.length <= 1" class="side-row">
-            <span class="k">出票账号</span>
-            <span class="v mono">{{ paramSide.account }}</span>
-          </div>
-          <div class="side-row">
-            <span class="k">系统</span>
-            <span class="v">{{ paramSide.system }}</span>
-          </div>
-          <div class="side-row">
-            <span class="k">接入方式</span>
-            <span class="v">{{ paramSide.accessType }}</span>
-          </div>
-          <div class="side-row">
-            <span class="k">覆盖影城</span>
-            <span class="v">{{ paramSide.cinemaCount }} 家</span>
-          </div>
-          <div class="side-row">
-            <span class="k">账号状态</span>
-            <span class="v">
-              <span class="pill" :class="paramSide.enabled ? 'ok' : ''">
-                {{ paramSide.enabled ? '启用' : '停用' }}
-              </span>
-            </span>
-          </div>
-          <div class="side-row">
-            <span class="k">凭证状态</span>
-            <span class="v">
-              <span class="pill" :class="paramSide.valid ? 'ok' : 'err'">
-                {{ paramSide.valid ? '有效' : '无效' }}
-              </span>
-            </span>
-          </div>
-          <div class="side-row">
-            <span class="k">最近校验</span>
-            <span class="v">{{ paramSide.checkedAt || '—' }}</span>
-          </div>
-
-          <!-- 接口里现在的值：和左边这次抓到的对着看，才知道是不是该换 -->
-          <div class="side-sub">当前参数值</div>
-          <template v-if="paramSideValues.length">
-            <div v-for="item in paramSideValues" :key="item.key" class="side-val">
-              <span class="k">{{ item.label }}</span>
-              <span class="v mono" :title="item.value">{{ item.value || '—' }}</span>
-            </div>
-          </template>
-          <div v-else class="side-empty">
-            {{ paramLoading ? '读取中…' : '接口里还没有存值' }}
-          </div>
-        </aside>
+        <div v-else class="empty-cell">
+          {{ paramLoading ? '读取中…' : '该程序没有配置抓包参数' }}
+        </div>
+        <div v-if="capturing" class="p-hint">
+          正在抓包（这 25 秒内会临时解密本机 HTTPS，抓完立刻恢复）。请到该系统的 H5 /
+          小程序里登录一次，抓到值会自动回填…
+        </div>
       </div>
 
       <template #footer>
@@ -1151,91 +1056,6 @@ tbody tr:hover td {
 
 /* 采集参数表：沿用主表的网格线，列宽跟着内容走，
    单个值给个上限，太长的 token 类内容截断，靠 title 看全文 */
-/* 参数弹窗：左边要抓的字段（值是空的），右边当前账号信息，方便对着看 */
-.param-dlg {
-  display: flex;
-  align-items: flex-start;
-  gap: 16px;
-}
-
-.param-main {
-  flex: 1;
-  min-width: 0;
-}
-
-.param-side {
-  width: 236px;
-  flex-shrink: 0;
-  padding-left: 14px;
-  border-left: 1px solid var(--line-soft);
-}
-
-.side-title {
-  margin-bottom: 6px;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--tx-4);
-}
-
-/* 多账号切换：占满一栏，比挤在标题旁边好点 */
-.acc-select {
-  width: 100%;
-  margin-bottom: 4px;
-}
-
-/* 「当前参数值」的分节：上面一条细线，和账号信息分开 */
-.side-sub {
-  margin: 10px 0 4px;
-  padding-top: 8px;
-  border-top: 1px solid var(--line-soft);
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--tx-4);
-}
-
-.side-val {
-  display: flex;
-  gap: 10px;
-  padding: 3px 0;
-  font-size: 11.5px;
-  line-height: 16px;
-}
-
-/* token 很长：允许换行，别截成一个看不懂的前缀 */
-.side-val .v {
-  flex: 1;
-  min-width: 0;
-  color: var(--tx);
-  word-break: break-all;
-}
-
-.side-empty {
-  font-size: 11.5px;
-  color: var(--tx-4);
-}
-
-.side-row {
-  display: flex;
-  gap: 10px;
-  padding: 4px 0;
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.side-row .k {
-  width: 60px;
-  flex-shrink: 0;
-  color: var(--tx-4);
-}
-
-.side-row .v {
-  min-width: 0;
-  color: var(--tx);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .param-wrap {
   max-height: 300px;
   overflow: auto;
