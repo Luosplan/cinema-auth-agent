@@ -179,7 +179,14 @@ export function buildCinemaTree(rows) {
   list.forEach((row, index) => {
     // 停用的程序不展示也不计数：后台停用 = 当前不可用，混进列表会把可用程序数撑大
     if (Number(row.enabled) === 0) return
-    const systemCode = String(row.system || row.program_key || row.runtime_system || '').trim()
+    /**
+     * 分组以「实际跑的系统」为准，不是配置里登记的那个。
+     * 例：大连麦凯乐泊林影城 `system=phoenix`，但 `runtime_system=program_key=jintaotao`，
+     * 出票实际走的是金淘淘 —— 按 system 分组会把它塞进凤凰云智（用户实测反馈过）。
+     */
+    const systemCode = String(
+      row.runtime_system || row.program_key || row.system || ''
+    ).trim()
     // 分组按字典归并（cx-* / oristar → 辰星系统），行上的 systemCode 保留原始代号给抓包用
     const groupKey = systemKeyOf(systemCode) || 'unknown'
     const programId = Number(row.program_id ?? 0)
