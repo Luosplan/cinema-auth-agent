@@ -582,7 +582,9 @@ onMounted(async () => {
   flex-shrink: 0;
 }
 
-.el-button+.el-button {
+/* 只收敛筛选栏里的相邻按钮：外层已有 gap，别再叠一层 Element 默认的 12px
+   不加限定会把弹窗底部的「取消 / 获取参数」也压成 0 间距 */
+.head-actions .el-button+.el-button {
   margin-left: 0;
 }
 
