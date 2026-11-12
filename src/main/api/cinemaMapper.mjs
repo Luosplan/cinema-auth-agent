@@ -164,17 +164,17 @@ export function captureConfigOf(credentials) {
  * 列表接口的 compact=1 只回值不回声明，靠 `credentials` 的键名反推会得到
  * phone / mobile / phoneNumber 一堆同义字段，真正要抓的 appletToken 反而看不出必填。
  *
- * **只回字段名，不回值**：参数值是要现场抓包抓出来的，接口里的旧值不预填
- * （预填了运营就不会去抓，等于拿着过期 token 以为是新的）。当前登录信息另放 `info`。
+ * 一个程序可能挂多个出票账号（接口按账号一行返回），每个账号各自一套参数值 ——
+ * 都带回去让界面能切换对比：左边表格要抓新值，右边显示接口里现在的值。
  *
- * 返回值：{ account, info, fields: [{ key, label, required, type, help }] }
+ * 返回值：{ fields: [{ key, label, required, type, help }],
+ *          accounts: [{ id, account, values: { key: value }, info }] }
+ * `fields` 里**没有 value**：参数值得现场抓，预填旧值运营就不会去抓了。
  */
-export function paramSchemaOf(row) {
-  const schema = row?.config_schema || row?.configSchema || {}
-  const credentials =
-    row?.user_credentials && Object.keys(row.user_credentials).length
-      ? row.user_credentials
-      : row?.credentials || {}
+export function paramSchemaOf(rows) {
+  const list = (Array.isArray(rows) ? rows : rows ? [rows] : []).filter(Boolean)
+  const first = list[0] || {}
+  const schema = first.config_schema || first.configSchema || {}
 
   const declared = Array.isArray(schema.fields) ? schema.fields : []
   const fields = declared
@@ -192,26 +192,48 @@ export function paramSchemaOf(row) {
 
   // 程序没声明 config_schema（老数据）才退回凭证键，否则会混进一堆同义手机号字段
   if (!fields.length) {
-    for (const [key, value] of Object.entries(credentials)) {
+    const creds = credentialsOf(first)
+    for (const [key, value] of Object.entries(creds)) {
       if (value === null || value === undefined || value === '') continue
       fields.push({ key, label: CREDENTIAL_LABELS[key] || key, required: null, type: '', help: '' })
     }
   }
 
-  const cinemaNames = Array.isArray(row?.cinema_id_names)
-    ? row.cinema_id_names.map((c) => c.name).filter(Boolean)
-    : []
-  const info = {
-    account: String(row?.account_name || ''),
-    system: String(row?.runtime_system || row?.program_key || row?.system || ''),
-    type: String(row?.type || ''),
-    cinemaCount: Number(row?.cinema_count) || cinemaNames.length || 1,
-    cinemaNames,
-    enabled: Number(row?.enabled) === 1,
-    credentialStatus: String(row?.credential_status || ''),
-    checkedAt: row?.credential_checked_at || ''
-  }
-  return { account: info.account, info, fields }
+  const accounts = list.map((row, i) => {
+    const creds = credentialsOf(row)
+    // 只回声明过的字段：phone / mobile 这些同义词不是要抓的东西
+    const values = {}
+    for (const field of fields) {
+      const value = creds[field.key]
+      if (value !== null && value !== undefined && value !== '') values[field.key] = String(value)
+    }
+    const cinemaNames = Array.isArray(row.cinema_id_names)
+      ? row.cinema_id_names.map((c) => c.name).filter(Boolean)
+      : []
+    return {
+      id: row.id ?? row.account_id ?? row.program_id ?? i,
+      account: String(row.account_name || ''),
+      values,
+      info: {
+        system: String(row.runtime_system || row.program_key || row.system || ''),
+        type: String(row.type || ''),
+        cinemaCount: Number(row.cinema_count) || cinemaNames.length || 1,
+        cinemaNames,
+        enabled: Number(row.enabled) === 1,
+        credentialStatus: String(row.credential_status || ''),
+        checkedAt: row.credential_checked_at || ''
+      }
+    }
+  })
+
+  return { fields, accounts }
+}
+
+/** user_credentials 优先，空对象再退回 credentials */
+function credentialsOf(row) {
+  const user = row?.user_credentials
+  if (user && Object.keys(user).length) return user
+  return row?.credentials || {}
 }
 
 /**

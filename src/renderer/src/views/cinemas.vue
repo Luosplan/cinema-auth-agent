@@ -220,7 +220,8 @@ async function openParam(cinema) {
   dialogCinema.value = cinema
   paramFields.value = []
   paramValues.value = {}
-  paramInfo.value = null
+  paramAccounts.value = []
+  paramAccountIdx.value = 0
   paramDialog.value = true
   await loadParamFields(cinema)
 }
@@ -233,8 +234,9 @@ async function loadParamFields(cinema) {
       ElMessage.error(res?.message || '读取参数失败')
       return
     }
-    paramInfo.value = res.info || null
     paramFields.value = Array.isArray(res.fields) ? res.fields : []
+    paramAccounts.value = Array.isArray(res.accounts) ? res.accounts : []
+    paramAccountIdx.value = 0
   } catch (e) {
     ElMessage.error(e.message || '读取参数失败')
   } finally {
@@ -293,20 +295,24 @@ const DETAIL_WIDTHS = {
 const paramFields = ref([])
 /** 抓包抓到的值，key → value；打开弹窗是空的，点「获取参数」才填 */
 const paramValues = ref({})
-/** 当前登录信息（账号 / 状态 / 凭证 / 校验时间），放右边做对比 */
-const paramInfo = ref(null)
+/** 接口里的出票账号（一个程序可能挂多个），每个带一套当前参数值 */
+const paramAccounts = ref([])
+const paramAccountIdx = ref(0)
 const paramLoading = ref(false)
 const capturing = ref(false)
+
+const activeAccount = computed(() => paramAccounts.value[paramAccountIdx.value] || null)
 
 /** 右侧「当前账号」：接口给了就用接口的，没给就退回表格里的那一行 */
 const paramSide = computed(() => {
   const cinema = dialogCinema.value
-  const info = paramInfo.value || {}
+  const row = activeAccount.value
+  const info = row?.info || {}
   const acc = accountsMap.value[cinema?.id]?.[0] || null
   const type = String(info.type || typeOf(cinema) || '').toLowerCase()
   const status = String(info.credentialStatus || '').toLowerCase()
   return {
-    account: info.account || acc?.accountId || '—',
+    account: row?.account || acc?.accountId || '—',
     system: activeSystem.value?.name || cinema?.systemCode || '—',
     accessType: type === 'h5' ? 'H5' : type ? '小程序' : '—',
     cinemaCount: Number(info.cinemaCount) || cinema?.sharedCount || 1,
@@ -314,6 +320,16 @@ const paramSide = computed(() => {
     valid: status ? status === 'valid' : isValid(acc),
     checkedAt: info.checkedAt || acc?.lastSync || ''
   }
+})
+
+/** 右侧「当前参数值」：接口里存的、这个账号现在用的值，和左边抓到的对着看 */
+const paramSideValues = computed(() => {
+  const values = activeAccount.value?.values || {}
+  return paramFields.value.map((field) => ({
+    key: field.key,
+    label: field.label,
+    value: values[field.key] || ''
+  }))
 })
 
 /** 标题带上「哪个程序 + 哪套账号」：同一系统几十个程序，光看影城名容易搞混 */
@@ -342,7 +358,7 @@ async function captureParams() {
   try {
     const res = await invoke('cinemas:capture-params', {
       keys,
-      systemCode: paramInfo.value?.system || cinema.systemCode || '',
+      systemCode: activeAccount.value?.info?.system || cinema.systemCode || '',
       waitMs: 25000
     })
     if (!res?.ok) {
@@ -631,7 +647,21 @@ onMounted(async () => {
 
         <aside class="param-side">
           <div class="side-title">当前账号</div>
-          <div class="side-row">
+          <!-- 一个程序挂多个出票账号时，这里切着看各自的当前参数值 -->
+          <el-select
+            v-if="paramAccounts.length > 1"
+            v-model="paramAccountIdx"
+            size="small"
+            class="acc-select"
+          >
+            <el-option
+              v-for="(item, i) in paramAccounts"
+              :key="item.id || i"
+              :label="item.account || `账号 ${i + 1}`"
+              :value="i"
+            />
+          </el-select>
+          <div v-if="paramAccounts.length <= 1" class="side-row">
             <span class="k">出票账号</span>
             <span class="v mono">{{ paramSide.account }}</span>
           </div>
@@ -666,6 +696,18 @@ onMounted(async () => {
           <div class="side-row">
             <span class="k">最近校验</span>
             <span class="v">{{ paramSide.checkedAt || '—' }}</span>
+          </div>
+
+          <!-- 接口里现在的值：和左边这次抓到的对着看，才知道是不是该换 -->
+          <div class="side-sub">当前参数值</div>
+          <template v-if="paramSideValues.length">
+            <div v-for="item in paramSideValues" :key="item.key" class="side-val">
+              <span class="k">{{ item.label }}</span>
+              <span class="v mono" :title="item.value">{{ item.value || '—' }}</span>
+            </div>
+          </template>
+          <div v-else class="side-empty">
+            {{ paramLoading ? '读取中…' : '接口里还没有存值' }}
           </div>
         </aside>
       </div>
@@ -1122,7 +1164,7 @@ tbody tr:hover td {
 }
 
 .param-side {
-  width: 208px;
+  width: 236px;
   flex-shrink: 0;
   padding-left: 14px;
   border-left: 1px solid var(--line-soft);
@@ -1132,6 +1174,43 @@ tbody tr:hover td {
   margin-bottom: 6px;
   font-size: 11.5px;
   font-weight: 600;
+  color: var(--tx-4);
+}
+
+/* 多账号切换：占满一栏，比挤在标题旁边好点 */
+.acc-select {
+  width: 100%;
+  margin-bottom: 4px;
+}
+
+/* 「当前参数值」的分节：上面一条细线，和账号信息分开 */
+.side-sub {
+  margin: 10px 0 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--tx-4);
+}
+
+.side-val {
+  display: flex;
+  gap: 10px;
+  padding: 3px 0;
+  font-size: 11.5px;
+  line-height: 16px;
+}
+
+/* token 很长：允许换行，别截成一个看不懂的前缀 */
+.side-val .v {
+  flex: 1;
+  min-width: 0;
+  color: var(--tx);
+  word-break: break-all;
+}
+
+.side-empty {
+  font-size: 11.5px;
   color: var(--tx-4);
 }
 

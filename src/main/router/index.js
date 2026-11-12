@@ -123,9 +123,11 @@ routers.push(
     try {
       const rows = await api.ctx.auth.get(`${CONFIG_PATH}&programId=${programId}`)
       const list = Array.isArray(rows) ? rows : []
-      const row = list.find((item) => Number(item.program_id) === programId) || list[0]
-      if (!row) return { ok: false, message: '未找到该程序' }
-      return { ok: true, ...paramSchemaOf(row) }
+      // 一个程序可能配了多个出票账号（接口按账号一行返回）：全带回去给界面切换
+      const matched = list.filter((item) => Number(item.program_id) === programId)
+      const use = matched.length ? matched : list
+      if (!use.length) return { ok: false, message: '未找到该程序' }
+      return { ok: true, ...paramSchemaOf(use) }
     } catch (e) {
       return { ok: false, message: e.message, status: e.status || 0 }
     }
