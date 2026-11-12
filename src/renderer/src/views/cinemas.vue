@@ -12,6 +12,10 @@ const autoRenew = ref({})
 const accountsMap = ref({})
 const activeSystemId = ref(0)
 const keyword = ref('')
+/** 接入方式筛选：'' 全部 / h5 / miniapp */
+const typeFilter = ref('')
+/** 账号配置筛选：'' 全部 / has 已有账号 / none 未配置账号 */
+const accountFilter = ref('')
 const loading = ref(false)
 const accountsLoading = ref(false)
 const error = ref('')
@@ -29,20 +33,31 @@ const activeSystem = computed(() => tree.value.find((s) => s.id === activeSystem
 
 const cinemas = computed(() => activeSystem.value?.children || [])
 
+/** 归一化接入方式：accessType 是 h5 / miniapp，个别数据只有 protocol */
+function typeOf(cinema) {
+  const raw = String(cinema?.accessType || cinema?.protocol || '').toLowerCase()
+  if (raw === 'h5') return 'h5'
+  if (raw === 'miniapp' || raw === 'miniprogram' || raw === 'wx') return 'miniapp'
+  return ''
+}
+
 const filteredCinemas = computed(() => {
+  // 只按影城名搜：编码和账号另有筛选口径，塞进同一个输入框反而不好预期
   const kw = keyword.value.trim().toLowerCase()
-  if (!kw) return cinemas.value
   return cinemas.value.filter((c) => {
-    if (String(c.name || '').toLowerCase().includes(kw)) return true
-    if (String(c.code || '').toLowerCase().includes(kw)) return true
-    return (accountsMap.value[c.id] || []).some((a) =>
-      String(a.accountId || '').toLowerCase().includes(kw)
-    )
+    if (typeFilter.value && typeOf(c) !== typeFilter.value) return false
+    const n = accountsMap.value[c.id]?.length || 0
+    if (accountFilter.value === 'has' && !n) return false
+    if (accountFilter.value === 'none' && n) return false
+    if (!kw) return true
+    return String(c.name || '').toLowerCase().includes(kw)
   })
 })
 
 /** 有没有生效中的筛选条件：没有时「重置」置灰，别给一个点了没反应的按钮 */
-const hasFilter = computed(() => !!keyword.value.trim())
+const hasFilter = computed(
+  () => !!accountFilter.value || !!typeFilter.value || !!keyword.value.trim()
+)
 
 const totalAccounts = computed(() =>
   cinemas.value.reduce((sum, c) => sum + (accountsMap.value[c.id]?.length || 0), 0)
@@ -119,11 +134,11 @@ async function copyAccountId(acc) {
   else ElMessage.warning('剪贴板不可用，请检查系统权限')
 }
 
-/** 出票程序接入方式：accessType 是 h5 / miniapp，个别数据只有 protocol */
+/** 出票程序接入方式的展示文案（归一化见 typeOf） */
 function typeText(cinema) {
-  const raw = String(cinema?.accessType || cinema?.protocol || '').toLowerCase()
-  if (raw === 'h5') return 'H5'
-  if (raw === 'miniapp' || raw === 'miniprogram' || raw === 'wx') return '小程序'
+  const t = typeOf(cinema)
+  if (t === 'h5') return 'H5'
+  if (t === 'miniapp') return '小程序'
   return cinema?.accessType || cinema?.protocol || '—'
 }
 
@@ -304,8 +319,10 @@ async function refreshAll() {
   await reload()
 }
 
-/** 重置筛选：搜索词回到默认，已加载的数据不动（要重拉数据用「刷新」） */
+/** 重置筛选：三个条件一起回到默认，已加载的数据不动（要重拉数据用「刷新」） */
 function resetFilters() {
+  accountFilter.value = ''
+  typeFilter.value = ''
   keyword.value = ''
 }
 
@@ -320,10 +337,25 @@ onMounted(async () => {
     <div class="head">
       <h1 class="head-title">影城账号</h1>
       <div class="head-actions">
+        <el-select
+          v-model="accountFilter"
+          size="small"
+          placeholder="账号"
+          class="type-filter"
+        >
+          <el-option label="全部影城" value="" />
+          <el-option label="已有账号" value="has" />
+          <el-option label="未配置账号" value="none" />
+        </el-select>
+        <el-select v-model="typeFilter" size="small" placeholder="类型" class="type-filter">
+          <el-option label="全部类型" value="" />
+          <el-option label="H5" value="h5" />
+          <el-option label="小程序" value="miniapp" />
+        </el-select>
         <el-input
           v-model="keyword"
           size="small"
-          placeholder="搜索影城 / 编码 / 账号"
+          placeholder="搜索影城"
           clearable
           class="search"
         />
@@ -601,6 +633,10 @@ onMounted(async () => {
 
 .search {
   width: 200px;
+}
+
+.type-filter {
+  width: 110px;
 }
 
 /* ---- 空态 ---- */
