@@ -55,6 +55,11 @@ const filteredCinemas = computed(() => {
   })
 })
 
+/** 有没有生效中的筛选条件：没有时「重置」置灰，别给一个点了没反应的按钮 */
+const hasFilter = computed(
+  () => !!accountFilter.value || !!typeFilter.value || !!keyword.value.trim()
+)
+
 const totalAccounts = computed(() =>
   cinemas.value.reduce((sum, c) => sum + (accountsMap.value[c.id]?.length || 0), 0)
 )
@@ -603,6 +608,13 @@ async function refreshAll() {
   await reload()
 }
 
+/** 重置筛选：三个条件一起回到默认，已加载的数据不动（要重拉数据用「刷新」） */
+function resetFilters() {
+  accountFilter.value = ''
+  typeFilter.value = ''
+  keyword.value = ''
+}
+
 /** 采集推送的订阅句柄：抓包是持续的，值随登录进度陆续到，不能只靠一次请求的返回 */
 let offParamUpdate = null
 
@@ -655,12 +667,13 @@ onUnmounted(() => {
           class="search"
         />
         <el-button size="small" @click="refreshAll">刷新</el-button>
+        <el-button size="small" :disabled="!hasFilter" @click="resetFilters">重置</el-button>
       </div>
     </div>
 
     <!-- 未登录 -->
     <div v-if="!auth.loggedIn" class="placeholder">
-      <div class="placeholder-text">登录会员账号后可查看名下影城与出票账号</div>
+      <div class="placeholder-text">请先登录会员账号</div>
       <el-button size="small" type="primary" @click="loginOpen = true">登录</el-button>
     </div>
 
@@ -993,6 +1006,10 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.el-button+.el-button {
+  margin-left: 0;
 }
 
 .search {
