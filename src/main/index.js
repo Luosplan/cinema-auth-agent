@@ -21,6 +21,7 @@ import CertificateAuthority from './mitm/CertificateAuthority'
 import MitmProxy from './mitm/MitmProxy'
 import SystemProxy, { parseProxyServer } from './mitm/SystemProxy'
 import Extractor from './collectors/Extractor'
+import { inFamily } from './collectors/SystemDomains'
 import { checkCaInstalled } from './mitm/CaTrust'
 import ConfigStore from './store/ConfigStore'
 import CredentialStore from './store/CredentialStore'
@@ -490,6 +491,14 @@ app.whenReady().then(async () => {
   ctx.extractor = new Extractor([])
   // 临时放行全部 HTTPS 的开关：只在「获取参数」那段抓包窗口里为 true
   ctx.interceptAll = false
+  /**
+   * 本次抓包窗口的解密范围（域名族集合）。
+   *
+   * 空集 = 还不知道该盯谁，靠 interceptAll 全量解密的兜底；
+   * 一旦锁定（点的是已知系统，或抓到第一个目标字段），就只有这一族域名还会被解密，
+   * 其余全部隧道直通 —— 不碰客户的其它流量，也让线索里只剩有用的域名。
+   */
+  ctx.focusHosts = null
   // 「获取参数」的手动停止标志，见 router 里的 cinemas:capture-stop
   ctx.captureStop = false
 
@@ -515,11 +524,16 @@ app.whenReady().then(async () => {
   ctx.proxy = new MitmProxy({
     ca: ctx.ca,
     /**
-     * 默认只解密「设置 → 抓包规则」里配过的域名，其余直通（不影响客户机别的网站）。
-     * `ctx.interceptAll` 是抓包按钮的临时放行开关：没配域名时靠它才能在窗口期内拿到请求头，
-     * 抓完立刻复位，不做常驻全量解密。
+     * 解密范围的三层判定，顺序不能换：
+     *   1. 已锁定域名族（点某个影城时的常规路径）→ 只解密这一族，其余隧道直通；
+     *   2. 还没锁定 → 靠 `interceptAll` 临时全量放行，先抓到第一条目标流量再说；
+     *   3. 都没有 → 只解密「设置 → 抓包规则」里配过的域名。
      */
-    matchHost: (host) => Boolean(ctx.interceptAll) || ctx.extractor.matchHost(host)
+    matchHost: (host) => {
+      if (ctx.focusHosts && ctx.focusHosts.size) return inFamily(host, ctx.focusHosts)
+      if (ctx.interceptAll) return true
+      return Boolean(ctx.extractor.matchHost(host))
+    }
   })
   ctx.proxy.onCapture = handleCapture
   ctx.proxy.onLog = log

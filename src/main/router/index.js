@@ -4,6 +4,7 @@ import { promisify } from 'node:util'
 import { join } from 'node:path'
 import fs from 'node:fs'
 import { pickValues, describeTraffic } from '../collectors/ParamCollector.js'
+import { seedHosts, inFamily, isNoiseHost, registrableOf } from '../collectors/SystemDomains.js'
 import { checkCaInstalled, probeCaInstalled } from '../mitm/CaTrust.js'
 import { parseProxyServer } from '../mitm/SystemProxy.js'
 import {
@@ -263,19 +264,38 @@ routers.push(
     }
 
     /**
-     * 解密范围：`设置 → 抓包规则` 里给这套系统配过域名就只解密那几个域名；
-     * 没配过（默认就是没配）就在这次抓包期间**临时放行全部 HTTPS**，抓完立刻恢复。
-     * 不放行的话流量全是隧道直通，这里永远拿不到请求头 / 响应体。
+     * 解密范围：点哪家影城，就只解密它那一族域名。
+     *
+     * 这几家系统的接口域名是固定的（凤凰云智永远在 yuekeyun.com 上），
+     * 所以按 systemCode 取出域名族直接锁定：h5lark / mtop / cdn / h5lark-be 全在族内，
+     * alicdn / mmstat / googleapis / h5api.m.taobao.com 这类浏览器的后台流量一律隧道直通 ——
+     * 不解密、不抓取、不参与取值。这样线索里只剩有用的域名，也不会把别人的同名 phone 混进来。
+     *
+     * 没登记过的系统（比如 mini 那套随机域名）退回「本次窗口临时全量解密」，
+     * 但在抓到第一个目标字段的那一刻会自动收窄到那一族，见下面的 lockFocus()。
      */
     const rule = ctx.extractor.activeRules.find((r) => r.id === systemCode)
-    const hasHosts = Boolean(rule && (rule.hosts || []).length)
-    const loose = !hasHosts
+    const ruleHosts = (rule?.hosts || []).map((h) => String(h).replace(/^\*\./, ''))
+    const focus = new Set(ruleHosts.length ? ruleHosts : seedHosts(systemCode))
+    ctx.focusHosts = focus
+    let loose = focus.size === 0
     if (loose) ctx.interceptAll = true
+
+    /** 锁定（或收窄）解密范围。锁定后 matchHost 只对族内域名返回 true */
+    const lockFocus = (host) => {
+      const family = registrableOf(host)
+      if (!family || focus.has(family)) return
+      focus.add(family)
+      api.log('info', `解密范围锁定 ${[...focus].join('、')}，其余域名不再解密`)
+    }
 
     try {
       const values = {}
-      const accept = (record) =>
-        hasHosts ? ctx.extractor.hostMatches(rule, record.host) : Boolean(record.host)
+      const accept = (record) => {
+        if (isNoiseHost(record.host)) return false
+        if (focus.size) return inFamily(record.host, focus)
+        return Boolean(record.host)
+      }
       // 只回扫最近 200 条：更早的基本是别的系统，翻全量没意义还慢
       let scanned = Math.max(0, ctx.captures.length - 200)
       /** 留一份命中的记录用于事后诊断（字段名对不上时靠它说清楚） */
@@ -288,14 +308,26 @@ routers.push(
           if (!accept(record)) continue
           accepted.push(record)
           if (accepted.length > 120) accepted.shift()
-          Object.assign(values, pickValues(record, keys))
+          const got = pickValues(record, keys)
+          if (!Object.keys(got).length) continue
+          Object.assign(values, got)
+          /**
+           * 兜底模式（这套系统没登记域名族）下抓到第一个目标字段时收窄：
+           * 给东西的这一族就是对的，其余域名立刻停止解密。
+           */
+          if (!focus.size) {
+            lockFocus(record.host)
+            loose = false
+            ctx.interceptAll = false
+          }
         }
         scanned = list.length
       }
 
       scanNew()
+      const startedAt = Date.now()
       const waitMs = Math.min(Math.max(Number(params.waitMs) || 20000, 3000), 60000)
-      const deadline = Date.now() + waitMs
+      const deadline = startedAt + waitMs
       let stopped = false
       /**
        * 窗口内看住系统代理：Clash 这类工具是随时可能重写配置的（用户去点一下开关就没了），
@@ -311,6 +343,18 @@ routers.push(
         }
         await new Promise((resolve) => setTimeout(resolve, 700))
         scanNew()
+
+        /**
+         * 安全网：登记的域名族一条流量都没收到（域名换了 / 库里的 code 对不上），
+         * 8 秒后临时放开为全量解密，别让人对着「一个参数都没抓到」干等 45 秒。
+         * 放开后仍会靠 lockFocus 在抓到第一个字段时重新收窄。
+         */
+        if (!loose && !accepted.length && Date.now() - startedAt >= 8000) {
+          focus.clear()
+          loose = true
+          ctx.interceptAll = true
+          api.log('warn', `${systemCode || '该系统'} 的固定域名没有流量，已临时放开为全量解密`)
+        }
 
         if (Date.now() - lastSysCheck >= 5000) {
           lastSysCheck = Date.now()
@@ -353,15 +397,19 @@ routers.push(
         ok: true,
         values,
         missing,
-        hints: missing.length ? describeTraffic(accepted) : null,
+        hints: missing.length ? { ...describeTraffic(accepted), scope: [...focus] } : null,
         // 用户点了「停止」而不是等满窗口：界面提示要说「保留已抓到的」，不算失败
         stopped,
         proxyRunning: ctx.proxyRunning,
+        // 本次只解密了哪些域名族 —— 界面上一句话就能说清「在盯谁」
+        scope: [...focus],
         // 本次是否用了「全量解密」窗口，界面提示里要说明
         loose
       }
     } finally {
       ctx.captureStop = false
+      // 解密范围只在这次窗口内有效：复位后除「设置 → 抓包规则」外一律隧道直通
+      ctx.focusHosts = null
       if (loose) ctx.interceptAll = false
     }
   })

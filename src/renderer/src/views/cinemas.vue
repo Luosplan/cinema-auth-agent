@@ -303,6 +303,8 @@ const capturing = ref(false)
 const stopping = ref(false)
 /** 抓包没凑齐时主进程带回来的线索：{ hosts, names } */
 const paramHints = ref(null)
+/** 本次抓包的解密范围（域名族），空数组 = 兜底全量解密 */
+const captureScope = ref([])
 
 const hintHosts = computed(() => paramHints.value?.hosts || [])
 /** 名字可能几十个，只摆前 30 个，再多也看不过来 */
@@ -342,6 +344,7 @@ async function captureParams() {
 
   capturing.value = true
   paramHints.value = null
+  captureScope.value = []
   try {
     const res = await invoke('cinemas:capture-params', {
       keys,
@@ -357,6 +360,7 @@ async function captureParams() {
     const values = res.values || {}
     paramValues.value = { ...paramValues.value, ...values }
     paramHints.value = res.hints || null
+    captureScope.value = res.scope || []
     const got = Object.keys(values).length
 
     /**
@@ -659,8 +663,14 @@ onMounted(async () => {
           {{ paramLoading ? '读取中…' : '该程序没有配置抓包参数' }}
         </div>
         <div v-if="capturing" class="p-hint">
-          正在抓包（这 45 秒内会临时解密本机 HTTPS）。现在切到浏览器刷新该系统的 H5 页面并完成登录，
+          正在抓包（只解密该系统的域名，其余流量照常直通）。现在切到浏览器刷新该系统的页面并完成登录，
           抓到的值会自动回填；已经抓到了就点「停止」，不用等满时间。
+        </div>
+
+        <!-- 抓包范围：先讲清「在盯谁」，用户就不用猜为什么别的域名一条都没进来 -->
+        <div v-if="!capturing && captureScope.length" class="p-scope">
+          本次只监听 <span class="mono">{{ captureScope.join('、') }}</span>
+          ，其余域名一律不解密
         </div>
 
         <!-- 抓不到时的排查线索：字段名对不上是常态，光说「没抓到」看不出原因 -->
@@ -1192,6 +1202,14 @@ tbody tr:hover td {
 
 /* 抓包进行中的提示，放在表格下面，别挤进表格里 */
 .p-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--tx-4);
+}
+
+/* 抓包范围：淡一行就够，不是重点但要能确认「确实只盯了这家」 */
+.p-scope {
   margin-top: 8px;
   font-size: 11px;
   line-height: 1.6;
