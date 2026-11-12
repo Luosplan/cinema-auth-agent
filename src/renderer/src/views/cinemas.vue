@@ -356,7 +356,7 @@ onMounted(async () => {
           clearable
           class="search"
         />
-        <el-button size="small" @click="refreshAll">刷新</el-button>
+        <el-button size="small" type="primary" @click="refreshAll">刷新</el-button>
         <el-button size="small" :disabled="!hasFilter" @click="resetFilters">重置</el-button>
       </div>
     </div>
@@ -403,7 +403,7 @@ onMounted(async () => {
             </div>
           </div>
           <div class="systems-foot">
-            共 {{ cinemas.length }} 家影城 · {{ totalAccounts }} 个账号
+            共 {{ cinemas.length }} 个程序 · {{ totalAccounts }} 个账号
           </div>
         </aside>
 
@@ -590,6 +590,8 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   padding: 22px 0 0;
+  /* 冷白底：白卡片浮在上面，是后台那套观感的来源 */
+  background: var(--bg-page);
 }
 
 .head {
@@ -662,7 +664,8 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   padding: 0 10px 16px 16px;
-  border-right: 1px solid var(--line-soft);
+  background: var(--bg);
+  border-right: 1px solid var(--line);
 }
 
 .systems-title {
@@ -711,10 +714,10 @@ onMounted(async () => {
 }
 
 .sys-item.active {
-  background: var(--bg-active);
-  color: var(--tx);
+  background: var(--accent-bg);
+  color: var(--accent);
   font-weight: 500;
-  box-shadow: inset 2px 0 0 var(--tx);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .sys-name {
@@ -732,7 +735,8 @@ onMounted(async () => {
 }
 
 .sys-item.active .sys-count {
-  color: var(--tx-3);
+  color: var(--accent);
+  opacity: 0.75;
 }
 
 .systems-foot {
@@ -760,6 +764,8 @@ table {
   table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
+  /* 表格自己撑一块白底，页面底色（冷白）只在四周露出来 */
+  background: var(--bg);
   border-top: 1px solid var(--line);
   border-left: 1px solid var(--line);
 }
@@ -798,7 +804,7 @@ tbody td {
 }
 
 tbody tr:hover td {
-  background: #fafafb;
+  background: var(--bg-hover);
 }
 
 .cinema-name {
@@ -917,7 +923,7 @@ tbody tr:hover td {
 }
 
 .op-link:hover {
-  color: var(--tx);
+  color: var(--accent);
 }
 
 /* ---- 弹窗 ---- */

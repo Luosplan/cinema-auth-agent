@@ -69,6 +69,8 @@ export const SYSTEM_ALIASES = {
   'cx-v104': 'cx-family',
   'cx-middleground': 'cx-family',
   blwh: 'cx-family',
+  // 奥映跑的就是辰星的程序（运营口径：奥映是辰星的一个门面），归到一组，别单列
+  oristar: 'cx-family',
   'mini-v1': 'mini-family',
   'mini-v2': 'mini-family',
   'mini-xxxshdz': 'mini-family',
@@ -101,7 +103,6 @@ export function systemOrderOf(code) {
   const index = CATALOG_ORDER.get(systemKeyOf(code))
   return index === undefined ? Number.MAX_SAFE_INTEGER : index
 }
-
 
 /** credentials 里的字段名 → 中文显示名（参数弹窗第一列） */
 export const CREDENTIAL_LABELS = {
@@ -173,41 +174,59 @@ export function accessTypeOf(row) {
 export function buildCinemaTree(rows) {
   const list = Array.isArray(rows) ? rows : []
   const groups = new Map()
+  /** programId → 节点：接口是「一个账号一行」，同一程序会重复出现，必须合并 */
+  const nodes = new Map()
   list.forEach((row, index) => {
+    // 停用的程序不展示也不计数：后台停用 = 当前不可用，混进列表会把可用程序数撑大
+    if (Number(row.enabled) === 0) return
     const systemCode = String(row.system || row.program_key || row.runtime_system || '').trim()
-    // 分组按字典归并（cx-* → 辰星系统），行上的 systemCode 保留原始代号给抓包用
+    // 分组按字典归并（cx-* / oristar → 辰星系统），行上的 systemCode 保留原始代号给抓包用
     const groupKey = systemKeyOf(systemCode) || 'unknown'
-    if (!groups.has(groupKey)) {
-      groups.set(groupKey, { id: groupKey, name: systemLabel(systemCode), children: [] })
-    }
     const programId = Number(row.program_id ?? 0)
-    groups.get(groupKey).children.push({
-      // program_id 一定在；账号配置 id 只有配过账号才有，不能当主键
-      id: programId || Number(row.id ?? row.account_id ?? 0) || index + 1,
-      programId,
-      name: row.name || row.program_name || '',
-      code: String(row.cinema_standard_ids || '').split(',')[0] || '',
-      city: row.city || row.cinema_cities || '',
-      systemCode,
-      systemKey: groupKey,
-      accessType: accessTypeOf(row),
-      captureConfig: captureConfigOf(row.user_credentials || row.credentials),
-      enabled: Number(row.enabled) === 1,
-      accountId: row.account_name || '',
-      accountCount: Number(row.account_count) || 0,
-      // 账号直接随行带下去，界面不用为每个程序再走一次 IPC
-      accounts: accountsOf(row),
-      credentialStatus: row.credential_status || '',
-      cinemaCount: Number(row.cinema_count) || 1,
-      cinemaNames: Array.isArray(row.cinema_id_names)
-        ? row.cinema_id_names.map((c) => c.name).filter(Boolean)
-        : []
-    })
+    // program_id 一定在；账号配置 id 只有配过账号才有，不能当主键
+    const id = programId || Number(row.id ?? row.account_id ?? 0) || index + 1
+    const key = `${groupKey}:${id}`
+
+    let node = nodes.get(key)
+    if (!node) {
+      if (!groups.has(groupKey)) {
+        groups.set(groupKey, { id: groupKey, name: systemLabel(systemCode), children: [] })
+      }
+      node = {
+        id,
+        programId,
+        name: row.name || row.program_name || '',
+        code: String(row.cinema_standard_ids || '').split(',')[0] || '',
+        city: row.city || row.cinema_cities || '',
+        systemCode,
+        systemKey: groupKey,
+        accessType: accessTypeOf(row),
+        captureConfig: captureConfigOf(row.user_credentials || row.credentials),
+        enabled: Number(row.enabled) === 1,
+        accountId: row.account_name || '',
+        accountCount: Number(row.account_count) || 0,
+        // 账号直接随行带下去，界面不用为每个程序再走一次 IPC
+        accounts: [],
+        credentialStatus: row.credential_status || '',
+        cinemaCount: Number(row.cinema_count) || 1,
+        cinemaNames: Array.isArray(row.cinema_id_names)
+          ? row.cinema_id_names.map((c) => c.name).filter(Boolean)
+          : []
+      }
+      nodes.set(key, node)
+      groups.get(groupKey).children.push(node)
+    }
+
+    // 同一程序的多行各带一个账号：按账号号去重合并，界面才能按账号铺成多行
+    for (const acc of accountsOf(row)) {
+      if (!node.accounts.some((item) => item.accountId === acc.accountId)) node.accounts.push(acc)
+    }
+    if (!node.accountId && row.account_name) node.accountId = row.account_name
+    node.accountCount = Math.max(node.accountCount, node.accounts.length)
   })
   // 按字典顺序排；字典外的排最后，按程序数多的在前，免得碎片沉在列表底下看不见
   return [...groups.values()].sort(
-    (a, b) =>
-      systemOrderOf(a.id) - systemOrderOf(b.id) || b.children.length - a.children.length
+    (a, b) => systemOrderOf(a.id) - systemOrderOf(b.id) || b.children.length - a.children.length
   )
 }
 
