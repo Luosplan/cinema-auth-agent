@@ -332,7 +332,8 @@ async function captureParams() {
     const res = await invoke('cinemas:capture-params', {
       keys,
       systemCode: paramAccounts.value[0]?.info?.system || cinema.systemCode || '',
-      waitMs: 25000
+      // 45 秒：够切到浏览器刷新一次、再把手机号登录走完
+      waitMs: 45000
     })
     if (!res?.ok) {
       ElMessage.error(res?.message || '获取失败')
@@ -590,7 +591,6 @@ onMounted(async () => {
               <tr v-for="row in paramFields" :key="row.key">
                 <td :title="row.help || row.key">
                   <div class="p-label">{{ row.label }}</div>
-                  <div v-if="row.help" class="p-help" :title="row.help">{{ row.help }}</div>
                 </td>
                 <td class="mono p-val" :title="paramValues[row.key] || ''">
                   <span v-if="paramValues[row.key]">{{ paramValues[row.key] }}</span>
@@ -612,8 +612,8 @@ onMounted(async () => {
           {{ paramLoading ? '读取中…' : '该程序没有配置抓包参数' }}
         </div>
         <div v-if="capturing" class="p-hint">
-          正在抓包（这 25 秒内会临时解密本机 HTTPS，抓完立刻恢复）。请到该系统的 H5 /
-          小程序里登录一次，抓到值会自动回填…
+          正在抓包（这 45 秒内会临时解密本机 HTTPS，抓完立刻恢复）。现在切到浏览器刷新该系统的 H5
+          页面并完成登录，抓到值会自动回填…
         </div>
       </div>
 

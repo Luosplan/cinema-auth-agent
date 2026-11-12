@@ -190,6 +190,21 @@ routers.push(
     const systemCode = String(params.systemCode || '')
     if (!keys.length) return { ok: false, message: '该程序没有配置抓包参数' }
 
+    /**
+     * 证书是硬前提：没装根证书时浏览器根本不会跟代理握手成功，
+     * 干等满一轮也只会拿到 0 个值 —— 先在这里拦掉并说清楚要做什么。
+     */
+    const caOk = await checkCaInstalled(ctx.ca.getFingerprint())
+    if (!caOk) {
+      return {
+        ok: false,
+        needCa: true,
+        message:
+          '根证书还没安装，HTTPS 解不开，抓不到任何请求。' +
+          '请先点底部「证书 未安装」完成安装，再回来点「获取参数」'
+      }
+    }
+
     if (!ctx.proxyRunning) {
       try {
         await ctx.startProxy()
