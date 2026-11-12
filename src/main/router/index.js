@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import fs from 'node:fs'
 import { pickValues } from '../collectors/ParamCollector.js'
 import { checkCaInstalled, probeCaInstalled } from '../mitm/CaTrust.js'
+import { parseProxyServer } from '../mitm/SystemProxy.js'
 import {
   buildCinemaTree,
   expandProgramToCinemas,
@@ -255,7 +256,8 @@ routers.push(
           message:
             `系统代理当前指向 ${actual}，不是采集助手（127.0.0.1:${port}），` +
             '浏览器流量没经过这里，所以抓不到任何内容。' +
-            '请关掉 Clash / VPN 之类软件的「系统代理」开关后再点「获取参数」'
+            '本程序已经把原来的代理挂成上游（出网不受影响），但系统代理被它改了回去；' +
+            '请在那类软件里关掉「系统代理」开关（软件本身可以继续开着），再点「获取参数」'
         }
       }
     }
@@ -310,6 +312,19 @@ routers.push(
           const now = await ctx.systemProxy.verify(port).catch(() => ({ ok: true }))
           if (!now.ok && !now.error && reasserts < 3) {
             reasserts += 1
+            /**
+             * 中途才打开 VPN 的情况：原来直连出网，用户为了上外网把 Clash 的系统代理打开了。
+             * 这时把它的地址接成上游，再把系统代理抢回 9090 —— 否则我们变成直连出网，
+             * 外网全断，用户只会以为「开了抓包就上不了网」。
+             */
+            if (!ctx.proxy.upstream) {
+              const adopted = parseProxyServer(now.actual)
+              const isSelf = adopted && adopted.port === port && adopted.host === '127.0.0.1'
+              if (adopted && !isSelf) {
+                ctx.proxy.setUpstream(adopted)
+                api.log('info', `检测到系统代理 ${adopted.host}:${adopted.port}，已接为上游`)
+              }
+            }
             await ctx.systemProxy.reapply(port).catch(() => {})
             api.log('warn', `系统代理被改回 ${now.actual || '空'}，已重新接管（第 ${reasserts} 次）`)
           }
@@ -375,6 +390,8 @@ routers.push(
       running: ctx.proxyRunning,
       port: ctx.proxy.port,
       stats: ctx.proxy.stats,
+      // 界面要能看出「出网是经谁转发的」，否则抓不到包时无从判断
+      upstream: ctx.proxy.upstream,
       systemProxy: sysProxy,
       platform: process.platform
     }

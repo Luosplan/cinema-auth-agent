@@ -19,7 +19,7 @@ import EventRouter from './router/EventRouter'
 import routers from './router/index'
 import CertificateAuthority from './mitm/CertificateAuthority'
 import MitmProxy from './mitm/MitmProxy'
-import SystemProxy from './mitm/SystemProxy'
+import SystemProxy, { parseProxyServer } from './mitm/SystemProxy'
 import Extractor from './collectors/Extractor'
 import { checkCaInstalled } from './mitm/CaTrust'
 import ConfigStore from './store/ConfigStore'
@@ -251,7 +251,32 @@ async function startProxy() {
     log('warn', '当前没有配置解密域名，抓包只记录不提取凭证')
   }
 
+  /**
+   * 先看一眼当前系统代理指向谁。systemProxy.enable() 里虽然也会备份，
+   * 但备份不给我们用；这里单独读一次，是为了知道「用户本来靠什么出网」，
+   * 待会儿要把它挂成上游代理。
+   */
+  const before = await ctx.systemProxy.read().catch(() => ({}))
+
   const actualPort = await ctx.proxy.start(port)
+
+  /**
+   * 接管系统代理之前读到的那个地址，就是用户原来的出网方式（基本是 Clash / V2Ray）。
+   *
+   * 必须把它设为上游：用户开着 VPN 才能上网，我们把系统代理改成 9090 之后，
+   * 如果还直连出网，用户立刻断网；只有「我们解密 → 其余原样转给它」两者才能共存。
+   * 端口撞上自己就置空，否则会形成回环。
+   */
+  const previous = parseProxyServer(before.proxyServer)
+  const isSelf =
+    previous &&
+    (previous.host === '127.0.0.1' || previous.host === 'localhost') &&
+    previous.port === actualPort
+  ctx.proxy.setUpstream(isSelf ? null : previous)
+  if (!previous && before.autoConfigUrl) {
+    log('warn', '系统代理用的是 PAC 自动配置，程序无法接管；抓包可能需要改用直连或手动指定代理')
+  }
+
   await ctx.systemProxy.enable(actualPort)
 
   /**

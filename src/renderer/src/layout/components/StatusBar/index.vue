@@ -32,6 +32,19 @@ const runningText = computed(() => {
   return proxyStatus.port ? `采集中 127.0.0.1:${proxyStatus.port}` : '采集中'
 })
 
+/**
+ * 鼠标悬停说明出网走哪条路。
+ * 开着 VPN 的用户最容易困惑「采集开着，但页面是我 VPN 出去的还是代理出去的」——
+ * 浏览器实际连的是本程序，出网那一段再交给上游，这里如实写出来。
+ */
+const runningTip = computed(() => {
+  if (!proxyStatus.running) return '当前没有采集'
+  const up = proxyStatus.upstream
+  return up
+    ? `已接管系统代理，出网经上游代理 ${up.host}:${up.port} 转发`
+    : '已接管系统代理，出网为直连'
+})
+
 const caOpen = ref(false)
 
 /** 点证书先当场复核一次再弹窗，别拿着过期状态让人白点一遍 */
@@ -71,7 +84,7 @@ onUnmounted(() => {
     <span class="sum">{{ summary }}</span>
 
     <div class="right">
-      <span class="stat" :class="{ on: proxyStatus.running }">
+      <span class="stat" :class="{ on: proxyStatus.running }" :title="runningTip">
         <span class="dot"></span>
         {{ runningText }}
       </span>

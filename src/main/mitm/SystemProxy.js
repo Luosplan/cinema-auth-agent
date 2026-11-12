@@ -6,6 +6,42 @@ const PS = ['-NoProfile', '-NonInteractive', '-Command']
 
 const WIN_REG_PATH = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'
 
+/**
+ * 解析注册表里的 ProxyServer 串，得到上游代理地址。
+ *
+ * Windows 上这个字段有三种写法，都得认：
+ *   "127.0.0.1:7897"                              —— 单一代理
+ *   "http=127.0.0.1:7897;https=127.0.0.1:7897"    —— 按协议分（Clash 常见）
+ *   "127.0.0.1"                                   —— 只有主机，端口默认 80
+ */
+export function parseProxyServer(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return null
+
+  // 按协议分时优先取 https / http 那一段
+  if (raw.includes('=')) {
+    const map = {}
+    raw.split(';').forEach((part) => {
+      const idx = part.indexOf('=')
+      if (idx === -1) return
+      map[part.slice(0, idx).trim().toLowerCase()] = part.slice(idx + 1).trim()
+    })
+    return parseHostPort(map.https || map.http || map.socks || '')
+  }
+  return parseHostPort(raw.split(';')[0])
+}
+
+function parseHostPort(text) {
+  const value = String(text || '').trim()
+  if (!value) return null
+  const idx = value.lastIndexOf(':')
+  if (idx === -1) return { host: value, port: 80 }
+  const host = value.slice(0, idx)
+  const port = Number(value.slice(idx + 1))
+  if (!host || !Number.isFinite(port) || port <= 0) return null
+  return { host, port }
+}
+
 function run(cmd, args, opts = {}) {
   return exec(cmd, args, { windowsHide: true, timeout: 20000, ...opts })
 }

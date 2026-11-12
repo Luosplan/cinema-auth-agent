@@ -12,6 +12,11 @@ export const proxyStatus = reactive({
   port: 0,
   /** 累计解密 / 直通计数，设置页的采集状态卡片要用 */
   stats: { intercepted: 0, tunneled: 0 },
+  /**
+   * 上游代理（Clash / V2Ray 之类）：接管系统代理前指向谁，就把谁当上游。
+   * null 表示直连出网。抓不到包时这是第一个要看的信息。
+   */
+  upstream: null,
   /** 正在切换：图标要禁用，避免连点把代理来回切 */
   busy: false
 })
@@ -24,6 +29,7 @@ async function poll() {
     proxyStatus.running = Boolean(s?.running)
     proxyStatus.port = s?.port || 0
     proxyStatus.stats = s?.stats || { intercepted: 0, tunneled: 0 }
+    proxyStatus.upstream = s?.upstream || null
   } catch {
     /* 轮询失败保留上一次状态，不打扰用户 */
   }

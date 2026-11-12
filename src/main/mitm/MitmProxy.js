@@ -27,6 +27,29 @@ export default class MitmProxy {
     this.onCapture = null
     this.onLog = null
     this.stats = { total: 0, intercepted: 0, tunneled: 0, failed: 0 }
+    /** 上游代理（通常是用户正在用的 Clash / V2Ray），null 表示直连 */
+    this.upstream = null
+    this._httpAgent = null
+    this._httpsAgent = null
+  }
+
+  /**
+   * 设置上游代理。
+   *
+   * 为什么需要：用户开着 Clash 才能出网，而 Clash 开着「系统代理」时系统代理指向它自己。
+   * 我们要抓包就把系统代理改成 9090，那用户瞬间断网（外网全没了）。
+   * 反过来让 Clash 占着系统代理，我们一条流量也收不到。
+   * 唯一能两者共存的做法是链式：系统代理指向本程序 → 本程序解密需要的 → 其余（含全部隧道）
+   * 原样转发给 Clash → Clash 出网。用户既有网，我们也能抓。
+   */
+  setUpstream(upstream) {
+    const ok = upstream && upstream.host && Number(upstream.port) > 0
+    this.upstream = ok ? { host: upstream.host, port: Number(upstream.port) } : null
+    this._httpAgent = this.upstream ? new UpstreamHttpAgent(this.upstream) : null
+    this._httpsAgent = this.upstream ? new UpstreamHttpsAgent(this.upstream) : null
+    if (this.upstream) {
+      this.log('info', `上游代理 ${this.upstream.host}:${this.upstream.port}（出网经它转发）`)
+    }
   }
 
   start(preferredPort = 9090) {
@@ -108,6 +131,37 @@ export default class MitmProxy {
   }
 
   tunnel(host, port, clientSocket, head) {
+    // 隧道也要经上游：用户的外网能力全在 Clash 上，直连只会一条都建不起来
+    if (this.upstream) {
+      connectViaProxy(this.upstream, host, port).then(
+        (upstreamSocket) => {
+          if (clientSocket.destroyed) {
+            upstreamSocket.destroy()
+            return
+          }
+          clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
+          if (head && head.length) upstreamSocket.write(head)
+          upstreamSocket.pipe(clientSocket)
+          clientSocket.pipe(upstreamSocket)
+
+          const destroy = () => {
+            upstreamSocket.destroy()
+            clientSocket.destroy()
+          }
+          upstreamSocket.on('error', destroy)
+          clientSocket.on('error', destroy)
+        },
+        (e) => {
+          this.stats.failed++
+          this.log('warn', `经上游隧道失败 ${host}:${port}: ${e.message}`)
+          if (!clientSocket.destroyed) {
+            clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n')
+          }
+        }
+      )
+      return
+    }
+
     const upstream = net.connect(port, host, () => {
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
       if (head && head.length) upstream.write(head)
@@ -133,15 +187,18 @@ export default class MitmProxy {
 
   /**
    * 明文 HTTP（极少见，但暖通类系统和部分降级接口仍会走）
+   *
+   * 接管系统代理期间这里是**全量入口**，不能再对没命中的域名回 502 ——
+   * 那等于用户一开采集，所有 http 页面全打不开。照常转发，只是不记录。
    */
   handlePlain(req, res) {
     const host = (req.headers.host || '').split(':')[0]
-    if (!this.shouldIntercept(host)) {
-      res.writeHead(502)
-      res.end('cinema-auth-agent: host not allowed')
-      return
-    }
-    this.forward(req, res, { host, port: 80, secure: false })
+    this.forward(req, res, {
+      host,
+      port: 80,
+      secure: false,
+      capture: this.shouldIntercept(host)
+    })
   }
 
   /**
@@ -153,7 +210,7 @@ export default class MitmProxy {
     this.forward(req, res, { host, port: port || 443, secure: true })
   }
 
-  forward(clientReq, clientRes, { host, port, secure }) {
+  forward(clientReq, clientRes, { host, port, secure, capture = true }) {
     const startedAt = Date.now()
     const reqChunks = []
     let reqSize = 0
@@ -178,6 +235,9 @@ export default class MitmProxy {
       rejectUnauthorized: true,
       servername: secure ? host : undefined
     }
+    // 有上游就走上游（CONNECT 隧道 + 可选 TLS），没有就走系统默认直连
+    const agent = secure ? this._httpsAgent : this._httpAgent
+    if (agent) options.agent = agent
 
     const upstreamReq = (secure ? https : http).request(options, (upstreamRes) => {
       const resChunks = []
@@ -195,6 +255,8 @@ export default class MitmProxy {
 
       upstreamRes.on('end', () => {
         clientRes.end()
+        // 未命中的域名只是借道出网，不进抓包缓冲
+        if (!capture) return
         this.emitCapture({
           id: randomUUID(),
           at: new Date().toISOString(),
@@ -256,6 +318,119 @@ export default class MitmProxy {
       this.server = null
     })
     this.mitmServer = null
+  }
+}
+
+/**
+ * 通过上游代理建立到 host:port 的 TCP 隧道（HTTP CONNECT）。
+ *
+ * 必须看 CONNECT 的响应码：Clash 拒连时回的是 403/502，
+ * 这里把真实原因抛出去，比让上层等到 30 秒超时好排查得多。
+ *
+ * 单独导出是为了能脱离 Electron 直接验证（.tmp 里的验收脚本用它连真实 Clash）。
+ */
+export function connectViaProxy(upstream, host, port, timeout = UPSTREAM_TIMEOUT) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(upstream.port, upstream.host)
+    let buf = ''
+
+    const cleanup = () => {
+      socket.setTimeout(0)
+      socket.removeListener('data', onData)
+      socket.removeListener('error', onError)
+    }
+    const fail = (e) => {
+      cleanup()
+      socket.destroy()
+      reject(e)
+    }
+    const onError = (e) => fail(e)
+    const onData = (chunk) => {
+      buf += chunk.toString('latin1')
+      const idx = buf.indexOf('\r\n\r\n')
+      if (idx === -1) {
+        if (buf.length > 16384) fail(new Error('上游代理响应头异常'))
+        return
+      }
+      const status = Number(buf.slice(0, idx).split(' ')[1] || 0)
+      const rest = Buffer.from(buf.slice(idx + 4), 'latin1')
+      if (status !== 200) {
+        fail(new Error(`上游代理拒绝 CONNECT（${status || '无响应'}）`))
+        return
+      }
+      cleanup()
+      // CONNECT 之后代理理论上不该抢发数据，但真发了就得还回读缓冲，不然会丢字节
+      if (rest.length) socket.unshift(rest)
+      resolve(socket)
+    }
+
+    socket.setTimeout(timeout, () => fail(new Error('上游代理连接超时')))
+    socket.on('error', onError)
+    socket.on('data', onData)
+    socket.on('connect', () => {
+      socket.write(
+        `CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n` +
+          'Proxy-Connection: keep-alive\r\n\r\n'
+      )
+    })
+  })
+}
+
+/** Agent 的 createConnection 是「成功/失败二选一」的回调，重复调用会让 Node 抛 already called */
+function onceify(fn) {
+  let called = false
+  return (...args) => {
+    if (called) return
+    called = true
+    fn(...args)
+  }
+}
+
+/** 明文 HTTP 经上游：CONNECT 隧道里发 origin-form 请求，直接复用原始 socket */
+export class UpstreamHttpAgent extends http.Agent {
+  constructor(upstream) {
+    super({ keepAlive: false })
+    this.upstream = upstream
+  }
+
+  createConnection(options, cb) {
+    const done = onceify(cb)
+    connectViaProxy(this.upstream, options.host, options.port).then(
+      (socket) => done(null, socket),
+      (e) => done(e)
+    )
+    return undefined
+  }
+}
+
+/**
+ * HTTPS 经上游：先 CONNECT 拿到裸 socket，再在这条隧道上做 TLS。
+ * 证书仍然严格校验（rejectUnauthorized 默认真），不因为有上游就降级。
+ */
+export class UpstreamHttpsAgent extends https.Agent {
+  constructor(upstream) {
+    super({ keepAlive: false })
+    this.upstream = upstream
+  }
+
+  createConnection(options, cb) {
+    const done = onceify(cb)
+    connectViaProxy(this.upstream, options.host, options.port).then(
+      (socket) => {
+        const tlsSocket = tls.connect({
+          socket,
+          servername: options.servername || options.host,
+          rejectUnauthorized: options.rejectUnauthorized !== false
+        })
+        tlsSocket.once('secureConnect', () => done(null, tlsSocket))
+        tlsSocket.once('error', (e) => {
+          socket.destroy()
+          done(e)
+        })
+      },
+      (e) => done(e)
+    )
+    return undefined
   }
 }
 
