@@ -148,7 +148,7 @@ function windowPid (hwnd) {
  * 当前可见的小程序窗口（hwnd → 标题）。
  *
  * 必须按进程归属过滤：Electron 自己的窗口类名也是 Chrome_WidgetWin_1，
- * 只看类名会把「影票授权助手」当成小程序窗口，判定永远成功。
+ * 只看类名会把「一票通-采集助手」当成小程序窗口，判定永远成功。
  */
 function appletWindows () {
   const pids = wechatPids()

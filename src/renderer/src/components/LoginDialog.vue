@@ -59,6 +59,7 @@ async function submit() {
     align-center
     :show-close="false"
     :close-on-click-modal="!loading"
+    append-to-body
   >
     <div class="head">
       <div class="title">登录会员账号</div>

@@ -907,20 +907,30 @@ routers.push(
 routers.push(
   new EventRoute('ca:uninstall', 'invoke', async (api) => {
     if (process.platform !== 'win32') return { ok: false, message: '暂不支持自动卸载' }
+    const fingerprint = api.ctx.ca.getFingerprint()
+    const thumb = fingerprint.replace(/:/g, '')
+
+    /**
+     * 这里不能用 PowerShell 的 Remove-Item。
+     *
+     * 用户根存储被系统保护，证书提供程序对 `Cert:\CurrentUser\Root` 的删除会直接抛
+     * 「不允许对用户根存储和 UI 执行操作」，而且这条错误在过去被 catch 吞掉、
+     * 脚本末尾照样输出 'ok' —— 界面提示卸载成功，证书其实还稳稳躺在受信任根里。
+     * certutil -user 走的是 CryptoAPI，删当前用户的根证书不需要管理员权限。
+     */
     try {
-      const thumb = api.ctx.ca.getFingerprint().replace(/:/g, '')
-      const script = [
-        `$tp='${thumb}'`,
-        'Get-ChildItem Cert:\\CurrentUser\\Root |',
-        '  Where-Object { $_.Thumbprint -eq $tp } |',
-        '  Remove-Item -Force',
-        "'ok'"
-      ].join('\n')
-      await ps(script)
-      return { ok: true }
-    } catch (e) {
-      return { ok: false, message: e.message }
+      await exec('certutil', ['-user', '-delstore', 'Root', thumb], {
+        windowsHide: true,
+        timeout: 30000
+      })
+    } catch {
+      // 证书本来就不在时 certutil 返回非 0，不算失败，交给下面统一复核
     }
+
+    const installed = await checkCaInstalled(fingerprint)
+    return installed
+      ? { ok: false, message: '卸载未生效，证书仍在受信任的根证书颁发机构里' }
+      : { ok: true, message: '证书已卸载' }
   })
 )
 
@@ -973,6 +983,45 @@ routers.push(
 routers.push(
   new EventRoute('reporter:test', 'invoke', async (api) => {
     return api.ctx.reporter.test()
+  })
+)
+
+/**
+ * 无边框窗口的控制按钮。
+ *
+ * `frame: false` 之后系统不再画 ─ □ ✕，只能由渲染层自绘标题栏调用这几个路由。
+ * 最大化状态额外通过 `window-state` 广播推给渲染层，让「还原」图标能跟着变。
+ */
+routers.push(
+  new EventRoute('window:minimize', 'invoke', async (api) => {
+    const win = api.getWin()
+    if (win) win.minimize()
+    return { ok: Boolean(win) }
+  })
+)
+
+routers.push(
+  new EventRoute('window:toggle-max', 'invoke', async (api) => {
+    const win = api.getWin()
+    if (!win) return { ok: false, maximized: false }
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+    return { ok: true, maximized: win.isMaximized() }
+  })
+)
+
+routers.push(
+  new EventRoute('window:close', 'invoke', async (api) => {
+    const win = api.getWin()
+    if (win) win.close()
+    return { ok: Boolean(win) }
+  })
+)
+
+routers.push(
+  new EventRoute('window:state', 'invoke', async (api) => {
+    const win = api.getWin()
+    return { maximized: Boolean(win && win.isMaximized()) }
   })
 )
 

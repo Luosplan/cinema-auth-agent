@@ -4,6 +4,7 @@ import { ElMessage } from 'element-plus'
 import { invoke, on } from '@utils/ipc'
 import { auth, loadAuth } from '../stores/auth'
 import { activeSystemId, ensureSystem, selectSystem } from '../stores/activeSystem'
+import { setCinemaStats } from '../stores/stats'
 import LoginDialog from '../components/LoginDialog.vue'
 import CopyIcon from '../components/CopyIcon.vue'
 
@@ -57,6 +58,16 @@ const filteredCinemas = computed(() => {
 
 const totalAccounts = computed(() =>
   cinemas.value.reduce((sum, c) => sum + (accountsMap.value[c.id]?.length || 0), 0)
+)
+
+/**
+ * 底部状态栏要显示当前系统的规模。数据本来就只在这里加载，
+ * 算完顺手写进 store，别让状态栏自己再拉一遍 tree + 账号。
+ */
+watch(
+  [cinemas, totalAccounts],
+  ([list, accounts]) => setCinemaStats(list.length, accounts),
+  { immediate: true }
 )
 
 /** 一个影城可能是 0 个、2 个、3 个账号：行数取账号数，没有账号也占一行看空态 */
@@ -540,7 +551,9 @@ async function stopCapture() {
   paramHint.value = '已停止采集'
 }
 
-/** 用 appid 拼出的直达链接，直接调主进程打微信；失败原因由主进程按窗口增量判定，文案直接用它给的 */
+/** 用 appid 拼出的直达链接，直接调主进程打微信；失败原因由主进程按窗口增量判定，文案直接用它给的
+ *  入口按钮暂时在模板里注释掉了（有更稳的走法），实现先留着，别让 lint 把它当垃圾清掉 */
+// eslint-disable-next-line no-unused-vars
 async function reopenMiniapp() {
   const cinema = dialogCinema.value
   if (!cinema) return
@@ -565,7 +578,9 @@ async function reopenMiniapp() {
  *
  * 主进程会自己激活微信、填词、回车，全程几百毫秒；失败时把原因原样带回来，
  * 因为它依赖前台窗口和搜索词，报错信息比「打开失败」有用得多。
+ * 按钮同样暂时注释掉了，实现保留
  */
+// eslint-disable-next-line no-unused-vars
 async function openBySearch() {
   const name = miniappInfo.value?.name || dialogCinema.value?.name || ''
   if (!name) return
@@ -678,7 +693,10 @@ onUnmounted(() => {
       <div v-else class="split">
         <!-- 左：出票系统 -->
         <aside class="systems">
-          <div class="systems-title">出票系统</div>
+          <div class="systems-title">
+            <span>出票系统</span>
+            <span class="sys-count">{{ tree.length }}</span>
+          </div>
           <div class="sys-list">
             <div
               v-for="sys in tree"
@@ -693,9 +711,6 @@ onUnmounted(() => {
               <span class="sys-name">{{ sys.name }}</span>
               <span class="sys-count">{{ sys.children?.length || 0 }}</span>
             </div>
-          </div>
-          <div class="systems-foot">
-            共 {{ cinemas.length }} 家影城 · {{ totalAccounts }} 个账号
           </div>
         </aside>
 
@@ -975,7 +990,7 @@ onUnmounted(() => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 22px 0 0;
+  padding: 15px 0 0;
 }
 
 .head {
@@ -1047,6 +1062,10 @@ onUnmounted(() => {
 
 .systems-title {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 0 8px 6px;
   font-size: 11px;
   font-weight: 600;
@@ -1054,7 +1073,13 @@ onUnmounted(() => {
   color: var(--tx-4);
 }
 
-/* 系统可能有三十多个：列表自己滚，标题和底部统计固定 */
+/* 标题行右侧的系统数量，口径要跟下面每一行的影城数一致，所以不加粗 */
+.systems-title .sys-count {
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+/* 系统可能有三十多个：列表自己滚，标题固定 */
 .sys-list {
   flex: 1;
   min-height: 0;
@@ -1106,15 +1131,6 @@ onUnmounted(() => {
 
 .sys-item.active .sys-count {
   color: var(--tx-3);
-}
-
-.systems-foot {
-  flex-shrink: 0;
-  margin-top: 8px;
-  padding: 8px 8px 0;
-  border-top: 1px solid var(--line-soft);
-  font-size: 10.5px;
-  color: var(--tx-4);
 }
 
 /* ---- 表格 ---- */

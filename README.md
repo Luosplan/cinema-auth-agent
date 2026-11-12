@@ -1,4 +1,4 @@
-# 影票授权助手（cinema-auth-agent）
+# 一票通-采集助手（cinema-auth-agent）
 
 > **当前分支：`yipiaotong` —— 一票通定制版**
 > 只装载一票通与象塑两套规则，界面不会出现其他票务系统的配置项。

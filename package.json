@@ -1,7 +1,7 @@
 {
   "name": "cinema-auth-agent",
   "version": "0.1.0",
-  "description": "影票授权助手 - 一票通影城登录态采集",
+  "description": "一票通-采集助手 - 影城登录态采集",
   "main": "./out/main/index.js",
   "author": "cinema-auth-agent",
   "scripts": {

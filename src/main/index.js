@@ -30,7 +30,7 @@ import CredentialStore from './store/CredentialStore'
 import Reporter from './reporter/Reporter'
 import MemberAuth from './auth/MemberAuth'
 
-const APP_TITLE = '影票授权助手'
+const APP_TITLE = '一票通-采集助手'
 const MAX_CAPTURES = 300
 /**
  * 小程序全量解密时缓冲要放大：整套 TLS 全解，几百条请求十几秒就填满，
@@ -118,6 +118,12 @@ function createWindow() {
     show: false,
     autoHideMenuBar: true,
     title: APP_TITLE,
+    /**
+     * 无边框：标题栏由渲染层自己画（深色那条，里面放采集开关、设置、账号）。
+     * 保留 thickFrame（默认 true），Windows 才有边缘拖拽缩放和阴影；
+     * 拖动区域靠 CSS 的 -webkit-app-region 声明，双击最大化由系统处理。
+     */
+    frame: false,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -135,6 +141,12 @@ function createWindow() {
     mainWindow.setTitle(APP_TITLE)
     mainWindow.show()
   })
+
+  // 最大化状态推给渲染层：标题栏那个「还原」图标要跟着变
+  const pushWindowState = () =>
+    broadcast('window-state', { maximized: mainWindow.isMaximized() })
+  mainWindow.on('maximize', pushWindowState)
+  mainWindow.on('unmaximize', pushWindowState)
 
 
   // 关闭窗口时若开启托盘驻留则隐藏而不退出 —— 采集需要长期在后台跑
@@ -154,6 +166,8 @@ function createWindow() {
 
   const eventRouter = new EventRouter()
   eventRouter.addApi('ctx', ctx)
+  // 无边框后窗口按钮要自己接，路由里拿不到 event，用取值函数避免持有旧引用
+  eventRouter.addApi('getWin', () => mainWindow)
   eventRouter.addApi('app', app)
   eventRouter.addApi('BrowserWindow', BrowserWindow)
   eventRouter.addApi('dialog', dialog)
