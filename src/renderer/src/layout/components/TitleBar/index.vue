@@ -173,19 +173,8 @@ onUnmounted(() => {
 <template>
   <header class="tbar">
     <div class="brand">
-      <!-- 浅色底下 logo 要反过来画：深色圆角块 + 白色票根，否则白底上看不见 -->
-      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
-        <rect width="24" height="24" rx="6.5" fill="#17181a" />
-        <rect x="5.4" y="8.3" width="13.2" height="7.4" rx="1.5" fill="#fff" />
-        <circle cx="5.4" cy="12" r="1.45" fill="#17181a" />
-        <circle cx="18.6" cy="12" r="1.45" fill="#17181a" />
-        <path
-          d="M12 9.2v1.5M12 11.25v1.5M12 13.3v1.5"
-          stroke="#17181a"
-          stroke-width="1"
-          stroke-linecap="round"
-        />
-      </svg>
+      <!-- 品牌标：后台同一个蓝色圆角块 + 白色 HK，两处视觉统一 -->
+      <span class="logo" aria-hidden="true">HK</span>
       <span class="app-name">HK票务助手</span>
     </div>
 
@@ -308,10 +297,21 @@ onUnmounted(() => {
   gap: 8px;
 }
 
+/* 品牌标：跟在后台网页端一模一样（蓝底白 HK），不用图片，放大也不糊 */
 .logo {
-  width: 20px;
-  height: 20px;
-  display: block;
+  width: 21px;
+  height: 21px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1;
 }
 
 .app-name {
@@ -396,19 +396,20 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   height: 27px;
-  padding: 0 10px;
+  padding: 0 11px;
   border: none;
   border-radius: 7px;
-  background: var(--bg-hover);
-  color: var(--tx);
+  background: var(--accent);
+  color: #fff;
   font-family: inherit;
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
+  transition: background 0.12s ease;
 }
 
 .login-btn:hover {
-  background: var(--bg-active);
+  background: var(--accent-hover);
 }
 
 .login-btn svg {
@@ -452,7 +453,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--tx);
+  background: var(--accent);
   color: #fff;
   font-size: 11.5px;
   font-weight: 600;
@@ -563,7 +564,7 @@ onUnmounted(() => {
 }
 
 .wc.close:hover {
-  background: #e81123;
+  background: var(--err);
 }
 
 .wc svg {

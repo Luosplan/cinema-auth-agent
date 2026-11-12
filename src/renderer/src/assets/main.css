@@ -1,70 +1,75 @@
 /* ============================================================
  * 设计令牌
- * 参考 Codex / Trae 这类工具型界面：中性灰阶、单一近黑主色、
- * 细边框代替阴影、紧凑行高。所有颜色只在这里定义，
+ * 配色对齐后台（HK票务系统）：品牌蓝 #168cff、冷白底 #f6f8fb、
+ * 蓝灰文字与边框、选中态用淡蓝而不是灰。所有颜色只在这里定义，
  * 页面里不允许再写死色值。
  * ============================================================ */
 :root {
   --bg: #ffffff;
-  --bg-panel: #f7f7f8;
-  --bg-hover: #f2f2f3;
-  --bg-active: #e6e6e8;
+  /* 页面底色：白卡片浮在冷白底上，是后台那套观感的来源 */
+  --bg-page: #f6f8fb;
+  --bg-panel: #f7f9fc;
+  --bg-hover: #f0f5fd;
+  --bg-active: #e9f2ff;
 
-  --line: #e7e7e9;
-  --line-soft: #f0f0f1;
-  --line-strong: #d9d9dc;
+  --line: #e8edf3;
+  --line-soft: #f1f5f9;
+  --line-strong: #d9e2ec;
 
-  --tx: #17181a;
-  --tx-2: #55585e;
-  --tx-3: #8b8f97;
-  --tx-4: #a9adb4;
+  --tx: #354154;
+  --tx-2: #46546a;
+  --tx-3: #738094;
+  --tx-4: #a3aebf;
 
-  --accent: #17181a;
-  --accent-hover: #000000;
+  /* 主色：后台的品牌蓝，按钮 / 选中 / 链接 / 开关统一用它 */
+  --accent: #168cff;
+  --accent-hover: #0d7ee8;
+  --accent-bg: #edf4fe;
+  --accent-line: #bfdcff;
 
-  --ok: #17803d;
-  --ok-bg: #eef7f1;
-  --warn: #a15c07;
-  --warn-bg: #fbf3e7;
-  --err: #b4382c;
-  --err-bg: #fbeeec;
+  --ok: #0e9f6e;
+  --ok-bg: #ecfdf3;
+  --warn: #f79009;
+  --warn-bg: #fffaeb;
+  --err: #f04438;
+  --err-bg: #fef3f2;
 
   --radius: 6px;
   --radius-lg: 8px;
   --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
 
-  /* ---- Element Plus 变量对齐（覆盖默认的 #409eff 蓝）---- */
-  --el-color-primary: #17181a;
-  --el-color-primary-light-3: #3a3b3e;
-  --el-color-primary-light-5: #5c5d61;
-  --el-color-primary-light-7: #b8b9bc;
-  --el-color-primary-light-8: #d5d6d8;
-  --el-color-primary-light-9: #eeeef0;
-  --el-color-primary-dark-2: #000000;
-  --el-color-success: #17803d;
-  --el-color-warning: #a15c07;
-  --el-color-danger: #b4382c;
-  --el-color-error: #b4382c;
-  --el-color-info: #8b8f97;
+  /* ---- Element Plus 变量对齐（主色换成品牌蓝）---- */
+  --el-color-primary: #168cff;
+  --el-color-primary-light-3: #52a9ff;
+  --el-color-primary-light-5: #8cc6ff;
+  --el-color-primary-light-7: #bfdcff;
+  --el-color-primary-light-8: #d9e9ff;
+  --el-color-primary-light-9: #edf4fe;
+  --el-color-primary-dark-2: #0b79e5;
+  --el-color-success: #0e9f6e;
+  --el-color-warning: #f79009;
+  --el-color-danger: #f04438;
+  --el-color-error: #f04438;
+  --el-color-info: #738094;
 
   --el-border-radius-base: 6px;
   --el-border-radius-small: 5px;
-  --el-border-color: #e7e7e9;
-  --el-border-color-light: #ededee;
-  --el-border-color-lighter: #f2f2f3;
-  --el-text-color-primary: #17181a;
-  --el-text-color-regular: #55585e;
-  --el-text-color-secondary: #8b8f97;
-  --el-text-color-placeholder: #a9adb4;
+  --el-border-color: #e8edf3;
+  --el-border-color-light: #eef2f7;
+  --el-border-color-lighter: #f3f6fa;
+  --el-text-color-primary: #354154;
+  --el-text-color-regular: #46546a;
+  --el-text-color-secondary: #738094;
+  --el-text-color-placeholder: #a3aebf;
   --el-bg-color: #ffffff;
-  --el-bg-color-page: #f7f7f8;
+  --el-bg-color-page: #f6f8fb;
   --el-bg-color-overlay: #ffffff;
-  --el-fill-color-light: #f7f7f8;
+  --el-fill-color-light: #f7f9fc;
   --el-fill-color-blank: #ffffff;
   --el-font-size-base: 13px;
   --el-component-size: 30px;
   --el-component-size-small: 26px;
-  --el-box-shadow-light: 0 6px 24px rgba(0, 0, 0, 0.07);
+  --el-box-shadow-light: 0 6px 24px rgba(21, 60, 120, 0.1);
 }
 
 * {
@@ -104,14 +109,14 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #d8d8db;
+  background: #ccd8e8;
   border: 3px solid transparent;
   background-clip: content-box;
   border-radius: 6px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #c2c3c7;
+  background: #b3c4da;
   background-clip: content-box;
 }
 
@@ -194,18 +199,29 @@ body {
   color: var(--tx-4);
 }
 
-/* 状态胶囊 */
+/* 状态胶囊：淡底 + 同色文字 + 前置圆点，和后台「有效 / 过期」那套一致 */
 .pill {
   display: inline-flex;
   align-items: center;
+  gap: 4px;
   height: 19px;
-  padding: 0 7px;
+  padding: 0 8px;
   font-size: 11px;
   line-height: 1;
-  border-radius: 4px;
-  color: var(--tx-2);
-  background: var(--bg-hover);
+  border-radius: 999px;
+  color: var(--tx-3);
+  background: var(--bg-panel);
   white-space: nowrap;
+}
+
+.pill::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.85;
 }
 
 .pill.ok {
@@ -231,15 +247,15 @@ body {
   line-height: 1.8;
 }
 
-/* 文内链接：下划线比颜色更适合这种克制的界面 */
+/* 文内链接：后台那套是蓝色文字链接，比下划线更直观 */
 .link {
-  color: var(--tx);
+  color: var(--accent);
   text-decoration: none;
-  border-bottom: 1px solid var(--line-strong);
 }
 
 .link:hover {
-  border-bottom-color: var(--tx);
+  color: var(--accent-hover);
+  text-decoration: underline;
 }
 
 /* ============================================================
@@ -254,19 +270,19 @@ body {
   --el-button-bg-color: var(--accent);
   --el-button-border-color: var(--accent);
   --el-button-hover-text-color: #fff;
-  --el-button-hover-bg-color: #2b2c2f;
-  --el-button-hover-border-color: #2b2c2f;
-  --el-button-active-bg-color: #000;
-  --el-button-active-border-color: #000;
-  --el-button-disabled-bg-color: #b8b9bc;
-  --el-button-disabled-border-color: #b8b9bc;
+  --el-button-hover-bg-color: var(--accent-hover);
+  --el-button-hover-border-color: var(--accent-hover);
+  --el-button-active-bg-color: #0b79e5;
+  --el-button-active-border-color: #0b79e5;
+  --el-button-disabled-bg-color: #a9d3ff;
+  --el-button-disabled-border-color: #a9d3ff;
 }
 
 .el-button:not(.is-text):not(.el-button--primary):not(.is-link) {
   --el-button-border-color: var(--line-strong);
-  --el-button-hover-border-color: #b9babd;
-  --el-button-hover-bg-color: var(--bg-hover);
-  --el-button-hover-text-color: var(--tx);
+  --el-button-hover-border-color: var(--accent-line);
+  --el-button-hover-bg-color: var(--accent-bg);
+  --el-button-hover-text-color: var(--accent);
 }
 
 .el-button.is-text {
@@ -295,7 +311,7 @@ body {
 
 .el-message {
   border-radius: var(--radius);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 6px 24px rgba(21, 60, 120, 0.12);
 }
 
 .el-message-box {
@@ -310,16 +326,16 @@ body {
 
 /* 弹窗：原生遮罩太黑、圆角太大，压到工具软件该有的克制程度 */
 .el-overlay {
-  background-color: rgba(23, 24, 26, 0.26);
+  background-color: rgba(22, 42, 72, 0.3);
 }
 
 .el-dialog {
   border-radius: 10px;
-  box-shadow: 0 24px 64px -16px rgba(0, 0, 0, 0.26);
+  box-shadow: 0 24px 64px -16px rgba(21, 60, 120, 0.28);
 }
 
 .el-popper.is-light {
   border-radius: var(--radius-lg);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 10px 30px rgba(21, 60, 120, 0.12);
 }
 

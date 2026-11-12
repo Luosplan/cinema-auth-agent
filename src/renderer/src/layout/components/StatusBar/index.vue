@@ -18,10 +18,11 @@ import CaDialog from '@renderer/components/CaDialog.vue'
 const version = ref('')
 
 const summary = computed(() => {
-  // 没登录时影城树本来就是空的，直接说「未登录」，别报成「共 0 家影城」
+  // 没登录时程序树本来就是空的，直接说「未登录」，别报成「共 0 个程序」
   if (!auth.loggedIn) return auth.loaded ? '未登录' : ''
   if (!cinemaStats.loaded) return '正在读取影城数据…'
-  return `共 ${cinemaStats.cinemas} 家影城 · ${cinemaStats.accounts} 个账号`
+  // 口径是「出票程序」不是「影城」：一个连锁程序能覆盖多家影城，按影城写会让人对不上数
+  return `共 ${cinemaStats.cinemas} 个程序 · ${cinemaStats.accounts} 个账号`
 })
 
 const runningText = computed(() => {

@@ -887,9 +887,9 @@ onUnmounted(() => {
 }
 
 .nav-item.active {
-  background: var(--bg-active);
-  border-color: var(--line-strong);
-  color: var(--tx);
+  background: var(--accent-bg);
+  border-color: var(--accent-line);
+  color: var(--accent);
   font-weight: 500;
 }
 
@@ -1226,8 +1226,8 @@ onUnmounted(() => {
 }
 
 .tab.active {
-  background: var(--bg-active);
-  color: var(--tx);
+  background: var(--accent-bg);
+  color: var(--accent);
   font-weight: 500;
 }
 
