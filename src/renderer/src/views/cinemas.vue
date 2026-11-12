@@ -40,6 +40,9 @@ const filteredCinemas = computed(() => {
   })
 })
 
+/** 有没有生效中的筛选条件：没有时「重置」置灰，别给一个点了没反应的按钮 */
+const hasFilter = computed(() => !!keyword.value.trim())
+
 const totalAccounts = computed(() =>
   cinemas.value.reduce((sum, c) => sum + (accountsMap.value[c.id]?.length || 0), 0)
 )
@@ -290,6 +293,11 @@ async function refreshAll() {
   await reload()
 }
 
+/** 重置筛选：搜索词回到默认，已加载的数据不动（要重拉数据用「刷新」） */
+function resetFilters() {
+  keyword.value = ''
+}
+
 onMounted(async () => {
   await loadAuth()
   if (auth.loggedIn) await reload()
@@ -309,12 +317,13 @@ onMounted(async () => {
           class="search"
         />
         <el-button size="small" @click="refreshAll">刷新</el-button>
+        <el-button size="small" :disabled="!hasFilter" @click="resetFilters">重置</el-button>
       </div>
     </div>
 
     <!-- 未登录 -->
     <div v-if="!auth.loggedIn" class="placeholder">
-      <div class="placeholder-text">登录会员账号后可查看名下影城与出票账号</div>
+      <div class="placeholder-text">请先登录会员账号</div>
       <el-button size="small" type="primary" @click="loginOpen = true">登录</el-button>
     </div>
 
@@ -571,6 +580,10 @@ onMounted(async () => {
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+.el-button+.el-button {
+  margin-left: 0;
 }
 
 .search {
