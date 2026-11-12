@@ -31,6 +31,11 @@ const PHONE_ALIAS_KEYS = new Set([
 ])
 const PHONE_VALUE_RE = /^\+?\d[\d-]{5,18}$/
 
+/** 这个字段名是不是「手机号」那一栏（后台写 mobile / phone / 手机号） */
+export function isPhoneKey(key) {
+  return PHONE_ORIGIN_KEYS.has(normKey(key))
+}
+
 /** 一条记录里能对上多少个字段，就返回多少个 */
 export function pickValues(record, keys) {
   /**

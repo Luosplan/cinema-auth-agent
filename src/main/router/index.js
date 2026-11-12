@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
 import fs from 'node:fs'
-import { pickValues, describeTraffic } from '../collectors/ParamCollector.js'
+import { pickValues, describeTraffic, isPhoneKey } from '../collectors/ParamCollector.js'
 import { seedHosts, inFamily, isNoiseHost, registrableOf } from '../collectors/SystemDomains.js'
 import { checkCaInstalled, probeCaInstalled } from '../mitm/CaTrust.js'
 import { parseProxyServer } from '../mitm/SystemProxy.js'
@@ -206,6 +206,26 @@ routers.push(
     const required = requiredKeys.length ? requiredKeys : keys
 
     /**
+     * 手机号的兜底：出票账号本身就是登录/会员手机号。
+     *
+     * 手机号在流量里**只出现在登录那一次请求**的 data 里（凤凰云智叫 loginId）；
+     * 已登录态下再刷新页面，浏览器只拿现成 sid 去拉数据，手机号一次都不会再发 ——
+     * 这也是「sid/tid 都抓到了、就手机号一直空」的原因。
+     * 后台这一栏配的是 `mobile`，恰好等于账号本身，那就不该逼用户退出登录重来。
+     *
+     * 只认标准 11 位手机号：账号是商户号 / 渠道码这类值时不会误填。
+     * 也不参与「什么时候算抓齐」的判定 —— 否则一开始就被补齐，等不到 sid / tid。
+     */
+    const account = String(params.account || '').trim()
+    const phoneFromAccount = []
+    if (/^(\+?86)?1[3-9]\d{9}$/.test(account)) {
+      for (const key of required) {
+        if (isPhoneKey(key)) phoneFromAccount.push(key)
+      }
+    }
+    const mustCapture = required.filter((key) => !phoneFromAccount.includes(key))
+
+    /**
      * 手动停止标志：一开始就同步清零。
      *
      * 必须放在第一个 await 之前 —— 界面上点完「获取参数」按钮就立刻能点「停止」，
@@ -361,7 +381,7 @@ routers.push(
          * 必填只有手机号时若是立刻收工，sid 就永远留在门外。
          * 所以必填齐了再等 2 秒把这一批收完，然后自动退出等待循环。
          */
-        if (required.every((key) => values[key])) {
+        if (mustCapture.every((key) => values[key])) {
           if (!settleUntil) settleUntil = Date.now() + 2000
           if (Date.now() >= settleUntil) break
         }
@@ -395,6 +415,19 @@ routers.push(
       scanNew()
 
       /**
+       * 手机号兜底：抓不到就用出票账号填上（上面已确认账号本身就是手机号）。
+       * 真抓到了就不覆盖 —— 抓到的永远优先。
+       */
+      const fromAccount = []
+      for (const key of phoneFromAccount) {
+        if (!values[key]) {
+          values[key] = account
+          fromAccount.push(key)
+        }
+      }
+      if (fromAccount.length) api.log('info', `手机号取自出票账号（${account}）`)
+
+      /**
        * `missing` 只算必填：会员成本 / 备注这类人工字段永远抓不到，
        * 把它们算进「还没抓到」会让界面在抓齐成功时也报红。
        */
@@ -421,6 +454,8 @@ routers.push(
         missing,
         // 必填全部到手：界面据此提示「已自动停止」，不是超时失败
         complete,
+        // 这些字段不是抓到的，是直接用出票账号补的（目前只有手机号）
+        fromAccount,
         // 没抓齐时的一句话原因：是没流量、没登录，还是字段名对不上
         reason,
         hints: missing.length ? { ...describeTraffic(accepted), scope: [...focus] } : null,

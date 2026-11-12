@@ -346,6 +346,12 @@ async function captureParams() {
        * 拿全字段当条件就只能干等满 45 秒。
        */
       requiredKeys: paramFields.value.filter((row) => row.required === true).map((row) => row.key),
+      /**
+       * 出票账号本身就是登录手机号（凤凰云智这类 H5 都这样）。
+       * 手机号只出现在登录那一次请求里，已登录态再刷新就再也发不出来，
+       * 所以主进程在抓不到手机号时会用它兜底 —— 账号不是手机号时不会误填。
+       */
+      account: paramAccountText.value,
       systemCode: paramAccounts.value[0]?.info?.system || cinema.systemCode || '',
       // 45 秒：够切到浏览器刷新一次、再把手机号登录走完
       waitMs: 45000
@@ -375,7 +381,8 @@ async function captureParams() {
      * 这里要说清「自动停了」，否则用户会以为按钮卡住。
      */
     if (res.complete) {
-      ElMessage.success(`必填参数已抓齐（${got} 个），已自动停止抓包`)
+      const from = res.fromAccount?.length ? '（手机号取自出票账号）' : ''
+      ElMessage.success(`必填参数已抓齐 ${got} 个${from}，已自动停止抓包`)
       return
     }
 
