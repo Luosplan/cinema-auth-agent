@@ -19,11 +19,16 @@ const ZERO = []
 
 /** systemCode → 域名族。key 同时收系统表 code 和影城表里的老叫法 */
 const SEEDS = {
-  // 凤凰系：H5 页面在 h5lark，接口在 mtop，静态在 cdn，前端包在 g.iyunzhi.com
-  phoenix: ['yuekeyun.com', 'iyunzhi.com'],
-  'phoenix-mini': ['yuekeyun.com', 'iyunzhi.com'],
-  'phoenix-jiaying': ['yuekeyun.com', 'iyunzhi.com'],
-  'phoenix-h5': ['yuekeyun.com', 'iyunzhi.com'],
+  /**
+   * 凤凰系：接口只有 mtop 一个。
+   * 页面（h5lark）和静态资源（cdn / g.iyunzhi）不参与取值，解不解密都不影响抓包，
+   * 但放开它们会白白多签一堆证书、多解一堆图片 HTML —— 按用户要求只盯接口。
+   */
+  phoenix: ['mtop.yuekeyun.com'],
+  'phoenix-mini': ['mtop.yuekeyun.com'],
+  // 佳影的接口挂在 h5web 上（HAR 模板 base 也是它），mtop 一并留着
+  'phoenix-jiaying': ['h5web.yuekeyun.com', 'mtop.yuekeyun.com'],
+  'phoenix-h5': ['mtop.yuekeyun.com'],
 
   // 辰星系：每家影城一个子域（h5jnjhyc.oristarcloud.com），族根一致
   'star-open': ['oristarcloud.com'],
@@ -38,9 +43,9 @@ const SEEDS = {
 
   suiying: ['shallyim.com'],
   sgycyk: ['shallyim.com'],
-  '360': ['yingyuan360.cn'],
+  360: ['yingyuan360.cn'],
   yingyuan360: ['yingyuan360.cn'],
-  '365': ['poke203.com'],
+  365: ['poke203.com'],
   imovie365: ['poke203.com'],
   'imovie365-sdgj': ['poke203.com'],
   'imovie-h5': ['poke203.com'],
@@ -52,7 +57,7 @@ const SEEDS = {
   tonul: ['tonul.cn'],
   paimeng: ['tonul.cn'],
   jintaotao: ['jintaotaodianying.com'],
-  '1905': ['1905.com'],
+  1905: ['1905.com'],
   movie1905: ['1905.com'],
   whale: ['jingyumovie.cn'],
   jingyu: ['jingyumovie.cn'],

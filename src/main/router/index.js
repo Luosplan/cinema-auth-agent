@@ -194,6 +194,18 @@ routers.push(
     if (!keys.length) return { ok: false, message: '该程序没有配置抓包参数' }
 
     /**
+     * 「抓到什么程度算完」的判据只认必填字段。
+     *
+     * 不能拿全部字段去判：captureConfig 里还有「会员成本 / 备注」这种人工填的字段，
+     * 它们永远不会出现在流量里，用全字段当条件就等于「永远抓不齐」，只能干等满 45 秒 ——
+     * 这也是之前「抓到了也不自动停」的原因。
+     */
+    const requiredKeys = Array.isArray(params.requiredKeys)
+      ? params.requiredKeys.map(String).filter((key) => keys.includes(key))
+      : []
+    const required = requiredKeys.length ? requiredKeys : keys
+
+    /**
      * 手动停止标志：一开始就同步清零。
      *
      * 必须放在第一个 await 之前 —— 界面上点完「获取参数」按钮就立刻能点「停止」，
@@ -336,25 +348,25 @@ routers.push(
        */
       let lastSysCheck = Date.now()
       let reasserts = 0
-      while (keys.some((key) => !values[key]) && Date.now() < deadline) {
+      /** 必填齐了之后再收 2 秒：同一批响应里常带着 larkSid / tid 这类非必填字段 */
+      let settleUntil = 0
+      while (Date.now() < deadline) {
         if (ctx.captureStop) {
           stopped = true
           break
         }
+        /**
+         * 抓齐就自动停，但**不是一抓到必填就立刻返回**：
+         * 凤凰云智的手机号和 larkSid / tid 是同一次登录请求/响应里下来的，
+         * 必填只有手机号时若是立刻收工，sid 就永远留在门外。
+         * 所以必填齐了再等 2 秒把这一批收完，然后自动退出等待循环。
+         */
+        if (required.every((key) => values[key])) {
+          if (!settleUntil) settleUntil = Date.now() + 2000
+          if (Date.now() >= settleUntil) break
+        }
         await new Promise((resolve) => setTimeout(resolve, 700))
         scanNew()
-
-        /**
-         * 安全网：登记的域名族一条流量都没收到（域名换了 / 库里的 code 对不上），
-         * 8 秒后临时放开为全量解密，别让人对着「一个参数都没抓到」干等 45 秒。
-         * 放开后仍会靠 lockFocus 在抓到第一个字段时重新收窄。
-         */
-        if (!loose && !accepted.length && Date.now() - startedAt >= 8000) {
-          focus.clear()
-          loose = true
-          ctx.interceptAll = true
-          api.log('warn', `${systemCode || '该系统'} 的固定域名没有流量，已临时放开为全量解密`)
-        }
 
         if (Date.now() - lastSysCheck >= 5000) {
           lastSysCheck = Date.now()
@@ -382,21 +394,35 @@ routers.push(
       // 停止或超时前最后扫一遍：跳出循环到返回之间可能刚好有新流量进来
       scanNew()
 
-      const missing = keys.filter((key) => !values[key])
-
       /**
-       * 有字段没对上时，顺手把这次见到的域名 / cookie / 头 / 字段名带回去。
-       * 参数名对不上才是常态（后台写 phone，接口里叫 loginId），
-       * 只说「没抓到」没法判断是没流量还是名字不对，界面把这份线索摆出来就能一次定位。
+       * `missing` 只算必填：会员成本 / 备注这类人工字段永远抓不到，
+       * 把它们算进「还没抓到」会让界面在抓齐成功时也报红。
        */
+      const missing = required.filter((key) => !values[key])
+      const complete = missing.length === 0
+
       if (missing.length) {
+        if (focus.size && !accepted.length) {
+          /**
+           * 一个值都没抓到且一条记录都没有：多半是这套系统的域名族登记得不对，
+           * 或者页面压根没打开。日志里点明，比「没抓到」有用。
+           */
+          api.log(
+            'warn',
+            `本期没收到 ${[...focus].join('、')} 的任何流量（可能域名表要更新，或页面还没刷新）`
+          )
+        }
         api.log('warn', `抓包未凑齐：缺 ${missing.join('、')}（命中记录 ${accepted.length} 条）`)
+      } else {
+        api.log('info', `必填参数已抓齐（${required.join('、')}），自动停止抓包`)
       }
 
       return {
         ok: true,
         values,
         missing,
+        // 必填全部到手：界面据此提示「已自动停止」，不是超时失败
+        complete,
         hints: missing.length ? { ...describeTraffic(accepted), scope: [...focus] } : null,
         // 用户点了「停止」而不是等满窗口：界面提示要说「保留已抓到的」，不算失败
         stopped,

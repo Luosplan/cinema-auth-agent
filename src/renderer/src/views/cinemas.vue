@@ -221,8 +221,6 @@ async function openParam(cinema) {
   paramFields.value = []
   paramValues.value = {}
   paramAccounts.value = []
-  // 上一轮的抓包线索不能带到这一轮，否则看着像这次抓到的
-  paramHints.value = null
   paramDialog.value = true
   await loadParamFields(cinema)
 }
@@ -301,14 +299,6 @@ const paramLoading = ref(false)
 const capturing = ref(false)
 /** 点了停止、等主进程把已抓到的值带回来：按钮要禁用，避免连点 */
 const stopping = ref(false)
-/** 抓包没凑齐时主进程带回来的线索：{ hosts, names } */
-const paramHints = ref(null)
-/** 本次抓包的解密范围（域名族），空数组 = 兜底全量解密 */
-const captureScope = ref([])
-
-const hintHosts = computed(() => paramHints.value?.hosts || [])
-/** 名字可能几十个，只摆前 30 个，再多也看不过来 */
-const hintNames = computed(() => (paramHints.value?.names || []).slice(0, 30))
 
 const paramAccountText = computed(
   () =>
@@ -343,11 +333,15 @@ async function captureParams() {
   }
 
   capturing.value = true
-  paramHints.value = null
-  captureScope.value = []
   try {
     const res = await invoke('cinemas:capture-params', {
       keys,
+      /**
+       * 必填字段才决定「什么时候自动停」。
+       * 会员成本 / 备注这些是人工填的，流量里永远不会出现，
+       * 拿全字段当条件就只能干等满 45 秒。
+       */
+      requiredKeys: paramFields.value.filter((row) => row.required === true).map((row) => row.key),
       systemCode: paramAccounts.value[0]?.info?.system || cinema.systemCode || '',
       // 45 秒：够切到浏览器刷新一次、再把手机号登录走完
       waitMs: 45000
@@ -359,8 +353,6 @@ async function captureParams() {
 
     const values = res.values || {}
     paramValues.value = { ...paramValues.value, ...values }
-    paramHints.value = res.hints || null
-    captureScope.value = res.scope || []
     const got = Object.keys(values).length
 
     /**
@@ -370,6 +362,15 @@ async function captureParams() {
     if (res.stopped) {
       if (got) ElMessage.info(`已停止抓包，保留已抓到的 ${got} 个参数`)
       else ElMessage.info('已停止抓包，这次还没有抓到参数')
+      return
+    }
+
+    /**
+     * 必填全到手：主进程已经提前退出了等待循环（不会等满 45 秒），
+     * 这里要说清「自动停了」，否则用户会以为按钮卡住。
+     */
+    if (res.complete) {
+      ElMessage.success(`必填参数已抓齐（${got} 个），已自动停止抓包`)
       return
     }
 
@@ -665,25 +666,6 @@ onMounted(async () => {
         <div v-if="capturing" class="p-hint">
           正在抓包（只解密该系统的域名，其余流量照常直通）。现在切到浏览器刷新该系统的页面并完成登录，
           抓到的值会自动回填；已经抓到了就点「停止」，不用等满时间。
-        </div>
-
-        <!-- 抓包范围：先讲清「在盯谁」，用户就不用猜为什么别的域名一条都没进来 -->
-        <div v-if="!capturing && captureScope.length" class="p-scope">
-          本次只监听 <span class="mono">{{ captureScope.join('、') }}</span>
-          ，其余域名一律不解密
-        </div>
-
-        <!-- 抓不到时的排查线索：字段名对不上是常态，光说「没抓到」看不出原因 -->
-        <div v-if="!capturing && hintNames.length" class="p-debug">
-          <div class="pd-title">还有字段没对上。本次流量里出现过的名字（可能参数名不一样）：</div>
-          <div v-if="hintHosts.length" class="pd-row">
-            <span class="pd-k">域名</span>
-            <span class="pd-v">{{ hintHosts.join('、') }}</span>
-          </div>
-          <div class="pd-row">
-            <span class="pd-k">字段</span>
-            <span class="pd-v mono">{{ hintNames.join('、') }}</span>
-          </div>
         </div>
       </div>
 
@@ -1206,45 +1188,6 @@ tbody tr:hover td {
   font-size: 11px;
   line-height: 1.6;
   color: var(--tx-4);
-}
-
-/* 抓包范围：淡一行就够，不是重点但要能确认「确实只盯了这家」 */
-.p-scope {
-  margin-top: 8px;
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--tx-4);
-}
-
-/* 抓不到时的排查块：比正文更淡，不抢戏，但要看得见 */
-.p-debug {
-  margin-top: 10px;
-  padding: 7px 9px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 5px;
-  background: var(--bg-panel);
-  font-size: 11px;
-  line-height: 1.6;
-}
-
-.pd-title {
-  margin-bottom: 3px;
-  color: var(--warn);
-}
-
-.pd-row {
-  display: flex;
-  gap: 6px;
-}
-
-.pd-k {
-  flex-shrink: 0;
-  color: var(--tx-4);
-}
-
-.pd-v {
-  color: var(--tx-3);
-  word-break: break-all;
 }
 
 .mini {

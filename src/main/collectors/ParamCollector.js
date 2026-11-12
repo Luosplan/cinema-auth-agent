@@ -194,7 +194,14 @@ function splitSetCookie(raw) {
   return raw.split(/,(?=\s*[^;,=\s]+=)/)
 }
 
-/** form-urlencoded：a=1&b=2，解码后按字段名对齐 */
+/**
+ * form-urlencoded：a=1&b=2，解码后按字段名对齐。
+ *
+ * 这里必须再往下一层：mtop 系的登录请求是
+ * `data=%7B%22loginId%22%3A%22138...%22%2C%22password%22%3A...%7D` ——
+ * 表单值本身就是一个 JSON 字符串。只按表单键对齐的话，手机号 / larkSid
+ * 全部藏在 `data` 这个值里面，一个都取不到（凤凰云智就是这么漏的）。
+ */
 function parseFormSafe(text, put) {
   const body = typeof text === 'string' ? text.trim() : ''
   if (!body || body.length > MAX_BODY_CHARS) return
@@ -203,7 +210,14 @@ function parseFormSafe(text, put) {
     if (!pair) return
     const eq = pair.indexOf('=')
     if (eq <= 0) return
-    put(decodeSafe(pair.slice(0, eq)), decodeSafe(pair.slice(eq + 1)))
+    const name = decodeSafe(pair.slice(0, eq))
+    const value = decodeSafe(pair.slice(eq + 1))
+    put(name, value)
+    const trimmed = value.trim()
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      const inner = parseJsonSafe(trimmed)
+      if (inner) walkJson(inner, put, 0)
+    }
   })
 }
 
