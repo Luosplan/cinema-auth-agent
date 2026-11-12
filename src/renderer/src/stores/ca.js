@@ -1,4 +1,5 @@
 import { reactive } from 'vue'
+import { ElMessage } from 'element-plus'
 import { invoke } from '@utils/ipc'
 import { refreshProxyStatus } from './proxy'
 
@@ -24,6 +25,16 @@ export async function refreshCa() {
     caInfo.installed = Boolean(res?.installed)
     caInfo.fingerprint = res?.fingerprint || ''
     caInfo.notAfter = res?.notAfter || null
+
+    /**
+     * 主进程发现证书已经没了、顺手把采集停了（用户绕开本程序去 certmgr 删的）。
+     * 这里立刻同步运行状态，别让状态栏再挂 3 秒「采集中」——
+     * 同时说一句，否则用户只会看到采集自己灭了，不知道为什么。
+     */
+    if (res?.stopped) {
+      await refreshProxyStatus()
+      ElMessage.warning('根证书已被移除，采集已自动停止')
+    }
   } catch {
     /* 读不到就保持上一次的值，别把已安装误显示成未安装 */
   } finally {

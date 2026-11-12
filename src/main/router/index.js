@@ -4,6 +4,7 @@ import { promisify } from 'node:util'
 import { join } from 'node:path'
 import fs from 'node:fs'
 import { pickValues } from '../collectors/ParamCollector.js'
+import { checkCaInstalled, probeCaInstalled } from '../mitm/CaTrust.js'
 import {
   buildCinemaTree,
   expandProgramToCinemas,
@@ -191,6 +192,16 @@ routers.push(
     if (!keys.length) return { ok: false, message: '该程序没有配置抓包参数' }
 
     /**
+     * 手动停止标志：一开始就同步清零。
+     *
+     * 必须放在第一个 await 之前 —— 界面上点完「获取参数」按钮就立刻能点「停止」，
+     * 而下面光证书校验就要几百毫秒。要是等校验完再清零，用户在那一瞬间点的停止
+     * 就会被这里覆盖掉，界面显示已停止、主进程还在傻等满 45 秒。
+     * 放在同步段里，后到的 stop 消息一定能被循环看到。
+     */
+    ctx.captureStop = false
+
+    /**
      * 证书是硬前提：没装根证书时浏览器根本不会跟代理握手成功，
      * 干等满一轮也只会拿到 0 个值 —— 先在这里拦掉并说清楚要做什么。
      */
@@ -242,22 +253,44 @@ routers.push(
       scanNew()
       const waitMs = Math.min(Math.max(Number(params.waitMs) || 20000, 3000), 60000)
       const deadline = Date.now() + waitMs
+      let stopped = false
       while (keys.some((key) => !values[key]) && Date.now() < deadline) {
+        if (ctx.captureStop) {
+          stopped = true
+          break
+        }
         await new Promise((resolve) => setTimeout(resolve, 700))
         scanNew()
       }
+      // 停止或超时前最后扫一遍：跳出循环到返回之间可能刚好有新流量进来
+      scanNew()
 
       return {
         ok: true,
         values,
         missing: keys.filter((key) => !values[key]),
+        // 用户点了「停止」而不是等满窗口：界面提示要说「保留已抓到的」，不算失败
+        stopped,
         proxyRunning: ctx.proxyRunning,
         // 本次是否用了「全量解密」窗口，界面提示里要说明
         loose
       }
     } finally {
+      ctx.captureStop = false
       if (loose) ctx.interceptAll = false
     }
+  })
+)
+
+/**
+ * 提前结束正在进行的抓包。
+ * 只是置标志，真正的收尾（返回已抓到的值、恢复解密范围）在 capture-params 的 finally 里做 ——
+ * 两边都去动 interceptAll / 代理状态会互相打脸。
+ */
+routers.push(
+  new EventRoute('cinemas:capture-stop', 'invoke', async (api) => {
+    api.ctx.captureStop = true
+    return { ok: true }
   })
 )
 
@@ -355,10 +388,33 @@ routers.push(
 routers.push(
   new EventRoute('ca:info', 'invoke', async (api) => {
     const { ctx } = api
+    const probe = await probeCaInstalled(ctx.ca.getFingerprint())
+    const installed = probe === 'yes'
+
+    /**
+     * 证书没了但采集还开着 —— 典型场景是用户绕开本程序，直接去 certmgr 里把证书删了。
+     * 代理此时给每个 HTTPS 签一张没人信任的证书，界面还亮着「采集中」，
+     * 却一条内容都解不出来，还会连带把客户机正在用的小程序搞报错。
+     * 这里就地停掉，界面下一轮轮询（或这次返回的 stopped）即可反映真实状态。
+     *
+     * 只在探到明确的 'no' 时动手：'unknown'（PowerShell 抖动 / 超时）不能当「证书被删」，
+     * 否则会平白停掉正在跑的采集。
+     */
+    let stopped = false
+    if (probe === 'no' && ctx.proxyRunning) {
+      try {
+        await api.stopProxy()
+        stopped = true
+      } catch {
+        /* 停失败不改结论：证书确实已经没了，这个事实优先 */
+      }
+    }
+
     return {
       fingerprint: ctx.ca.getFingerprint(),
       notAfter: ctx.ca.caCert?.validity?.notAfter || null,
-      installed: await checkCaInstalled(ctx.ca.getFingerprint())
+      installed,
+      stopped
     }
   })
 )
@@ -530,26 +586,6 @@ routers.push(
     return { ok: true, enabled: Boolean(enabled) }
   })
 )
-
-/**
- * 判断根证书是否已在「当前用户 / 受信任根」里。
- * 用 SHA1 指纹比对，不比对主题名 —— 主题名可以伪造，指纹不会。
- */
-async function checkCaInstalled(fingerprint) {
-  if (process.platform !== 'win32') return false
-  try {
-    const thumb = fingerprint.replace(/:/g, '')
-    const script = [
-      `$tp='${thumb}'`,
-      "$found = Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Thumbprint -eq $tp }",
-      'if ($found) { "yes" } else { "no" }'
-    ].join('\n')
-    const { stdout } = await ps(script)
-    return stdout.trim() === 'yes'
-  } catch {
-    return false
-  }
-}
 
 /**
  * 窗口控制。

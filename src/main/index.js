@@ -1,4 +1,14 @@
-import { app, shell, BrowserWindow, ipcMain, dialog, Tray, Menu, nativeImage } from 'electron'
+import {
+  app,
+  shell,
+  BrowserWindow,
+  ipcMain,
+  dialog,
+  Tray,
+  Menu,
+  nativeImage,
+  Notification
+} from 'electron'
 import { join } from 'node:path'
 import fs from 'node:fs'
 import { execFileSync } from 'node:child_process'
@@ -11,6 +21,7 @@ import CertificateAuthority from './mitm/CertificateAuthority'
 import MitmProxy from './mitm/MitmProxy'
 import SystemProxy from './mitm/SystemProxy'
 import Extractor from './collectors/Extractor'
+import { checkCaInstalled } from './mitm/CaTrust'
 import ConfigStore from './store/ConfigStore'
 import CredentialStore from './store/CredentialStore'
 import Reporter from './reporter/Reporter'
@@ -54,6 +65,24 @@ function log(level, message) {
 function broadcast(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload)
+  }
+}
+
+/** 把主窗口叫到前面来。托盘点击、托盘拦截提示都会用到 */
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+}
+
+/** 系统通知。托盘里操作被拦下时，光写日志用户是看不到的 */
+function notify(title, body) {
+  try {
+    if (!Notification.isSupported()) return
+    new Notification({ title, body, icon }).show()
+  } catch {
+    /* 通知发不出去不影响主流程，日志里已有记录 */
   }
 }
 
@@ -148,12 +177,7 @@ function createTray() {
   )
   tray.setToolTip(APP_TITLE)
   updateTrayMenu()
-  tray.on('double-click', () => {
-    if (mainWindow) {
-      mainWindow.show()
-      mainWindow.focus()
-    }
-  })
+  tray.on('double-click', showMainWindow)
 }
 
 function updateTrayMenu() {
@@ -162,20 +186,23 @@ function updateTrayMenu() {
     {
       label: ctx.proxyRunning ? '采集中（点击停止）' : '已停止（点击开始）',
       click: async () => {
-        if (ctx.proxyRunning) await stopProxy()
-        else await startProxy()
+        if (ctx.proxyRunning) {
+          await stopProxy()
+        } else {
+          const res = await startProxy()
+          // 托盘这条入口不经过渲染层的「先装证书」引导，被闸拦下时必须主动说一声
+          if (res?.needCa) {
+            notify('根证书未安装', '请先在面板右下角「证书 未安装」里安装根证书，装完才能开始采集')
+            showMainWindow()
+          }
+        }
         updateTrayMenu()
       }
     },
     { type: 'separator' },
     {
       label: '打开面板',
-      click: () => {
-        if (mainWindow) {
-          mainWindow.show()
-          mainWindow.focus()
-        }
-      }
+      click: showMainWindow
     },
     { type: 'separator' },
     {
@@ -191,6 +218,30 @@ function updateTrayMenu() {
 
 async function startProxy() {
   if (ctx.proxyRunning) return { running: true, port: ctx.proxy.port }
+
+  /**
+   * 硬闸：没装根证书不许开采集。
+   *
+   * 这不是「提示」而是「拦住」—— 少了证书浏览器根本不会跟代理握手成功，
+   * 代理只会给每个 HTTPS 签一张没人信任的证书：界面亮着「采集中」，
+   * 实际一条 token 都解不出来，还会让客户机正在用的小程序报证书错误。
+   * 渲染层点按钮前已经引导过一次，但托盘菜单、开机自动启动都不经过渲染层，
+   * 所以闸必须放在这里，所有入口才都拦得住。
+   *
+   * 只在 Windows 上闸：其他系统的导入是手动的，程序查不到信任状态，
+   * 硬拦会变成「永远启动不了」，那边继续靠渲染层的引导文案处理。
+   */
+  if (process.platform === 'win32') {
+    const caOk = await checkCaInstalled(ctx.ca.getFingerprint())
+    if (!caOk) {
+      log('warn', '根证书未安装，已拦截启动采集')
+      return {
+        running: false,
+        needCa: true,
+        error: '根证书还没安装，装完才能开始采集（点右下角「证书 未安装」安装）'
+      }
+    }
+  }
 
   const port = ctx.config.get('proxy.port') || 9090
   // 抓包规则已整体移除，解密域名待后续单独接入（设置页会保留入口）。
@@ -385,6 +436,8 @@ app.whenReady().then(async () => {
   ctx.extractor = new Extractor([])
   // 临时放行全部 HTTPS 的开关：只在「获取参数」那段抓包窗口里为 true
   ctx.interceptAll = false
+  // 「获取参数」的手动停止标志，见 router 里的 cinemas:capture-stop
+  ctx.captureStop = false
 
   ctx.systemProxy = new SystemProxy()
   ctx.reporter = new Reporter({

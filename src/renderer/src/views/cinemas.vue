@@ -297,6 +297,8 @@ const paramValues = ref({})
 const paramAccounts = ref([])
 const paramLoading = ref(false)
 const capturing = ref(false)
+/** 点了停止、等主进程把已抓到的值带回来：按钮要禁用，避免连点 */
+const stopping = ref(false)
 
 const paramAccountText = computed(
   () =>
@@ -317,6 +319,9 @@ const paramTitle = computed(() => {
 /**
  * 获取参数：开抓包代理，等这套系统的请求过来，按字段名回填。
  * 值的落点各家不一样（cookie / 请求头 / 请求体 / 响应体），由 pickValues 全翻一遍。
+ *
+ * 这一步会一直阻塞到「凑齐 / 超时 / 用户点停止」，所以界面上必须有停止的出口 ——
+ * 否则用户发现字段其实已经抓到了，也只能干等剩下的几十秒。
  */
 async function captureParams() {
   const cinema = dialogCinema.value
@@ -339,9 +344,21 @@ async function captureParams() {
       ElMessage.error(res?.message || '获取失败')
       return
     }
+
     const values = res.values || {}
     paramValues.value = { ...paramValues.value, ...values }
     const got = Object.keys(values).length
+
+    /**
+     * 手动停止：不是失败，已抓到的照常落表格，没抓到的保持「待抓取」。
+     * 别用 warning/error 的口气，用户是自己要求停的。
+     */
+    if (res.stopped) {
+      if (got) ElMessage.info(`已停止抓包，保留已抓到的 ${got} 个参数`)
+      else ElMessage.info('已停止抓包，这次还没有抓到参数')
+      return
+    }
+
     if (!got) {
       ElMessage.warning('这次没有抓到数据，请在「抓包日志」里确认有该系统的请求')
     } else if (res.missing?.length) {
@@ -353,8 +370,28 @@ async function captureParams() {
     ElMessage.error(e.message || '获取失败')
   } finally {
     capturing.value = false
+    stopping.value = false
   }
 }
+
+/**
+ * 停止抓包：主进程只是置个标志，等待循环下一拍就退出并把已抓到的值带回来，
+ * 所以这里不 await 结果，也不在这里改 capturing —— 由 captureParams 的 finally 统一收尾。
+ */
+async function stopCapture() {
+  if (!capturing.value || stopping.value) return
+  stopping.value = true
+  try {
+    await invoke('cinemas:capture-stop')
+  } catch {
+    stopping.value = false
+  }
+}
+
+/** 抓包时直接把弹窗关掉：别让主进程还在后台等满 45 秒 */
+watch(paramDialog, (open) => {
+  if (!open && capturing.value) invoke('cinemas:capture-stop').catch(() => {})
+})
 
 /** 复制抓到的值；还没抓到时退回复制字段名，不留一个点不动的按钮 */
 async function copyParam(row) {
@@ -612,13 +649,24 @@ onMounted(async () => {
           {{ paramLoading ? '读取中…' : '该程序没有配置抓包参数' }}
         </div>
         <div v-if="capturing" class="p-hint">
-          正在抓包（这 45 秒内会临时解密本机 HTTPS，抓完立刻恢复）。现在切到浏览器刷新该系统的 H5
-          页面并完成登录，抓到值会自动回填…
+          正在抓包（这 45 秒内会临时解密本机 HTTPS）。现在切到浏览器刷新该系统的 H5 页面并完成登录，
+          抓到的值会自动回填；已经抓到了就点「停止」，不用等满时间。
         </div>
       </div>
 
       <template #footer>
         <el-button size="small" @click="paramDialog = false">关闭</el-button>
+        <!-- 抓包是个长阻塞动作，必须给出中途退出的口子，停完保住已抓到的值 -->
+        <el-button
+          v-if="capturing"
+          size="small"
+          type="danger"
+          plain
+          :loading="stopping"
+          @click="stopCapture"
+        >
+          停止
+        </el-button>
         <el-button size="small" type="primary" :loading="capturing" @click="captureParams">
           获取参数
         </el-button>
