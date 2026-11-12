@@ -9,7 +9,6 @@ import LoginDialog from '../components/LoginDialog.vue'
 import CopyIcon from '../components/CopyIcon.vue'
 
 const tree = ref([])
-const autoRenew = ref({})
 const accountsMap = ref({})
 const keyword = ref('')
 /** 接入方式筛选：'' 全部 / h5 / miniapp */
@@ -27,7 +26,7 @@ const dialogCinema = ref(null)
 
 /** 表头 + 行的列宽：合并单元格靠 rowspan 撑开，宽度必须固定，否则会随账号数抖动
  *  标签列按「pill 实际宽度 + padding」倒推，窄了会被 text-overflow 截成「启用…」 */
-const COLS = ['28%', '10%', '18%', '8%', '8%', '10%', '15%']
+const COLS = ['30%', '10%', '22%', '9%', '9%', '20%']
 
 const activeSystem = computed(() => tree.value.find((s) => s.id === activeSystemId.value) || null)
 
@@ -169,7 +168,6 @@ async function loadTree() {
       return
     }
     tree.value = res.tree || []
-    autoRenew.value = res.autoRenew || {}
     // 缓存的系统可能已经不在树里（换账号/授权变了），只在那种情况下才改选
     ensureSystem(tree.value)
   } catch (e) {
@@ -258,16 +256,6 @@ watch(paramDialog, (open) => {
 function openDetail(cinema) {
   dialogCinema.value = cinema
   detailDialog.value = true
-}
-
-async function toggleAutoRenew(cinema, value) {
-  const res = await invoke('cinemas:auto-renew', { cinemaGroupId: cinema.id, enabled: value })
-  if (res?.ok) {
-    autoRenew.value = res.autoRenew
-    ElMessage.success(value ? '已开启自动续期' : '已关闭自动续期')
-  } else {
-    ElMessage.error(res?.message || '设置失败')
-  }
 }
 
 /** 详情弹窗里展示的关联影城列表（服务端随 group-tree 下发） */
@@ -727,7 +715,6 @@ onUnmounted(() => {
                 <th class="center-head">出票账号</th>
                 <th class="center-head">状态</th>
                 <th class="center-head">账号</th>
-                <th class="center-head">自动续期</th>
                 <th class="center-head">操作</th>
               </tr>
             </thead>
@@ -787,14 +774,6 @@ onUnmounted(() => {
                     <span v-else class="dim">—</span>
                   </td>
 
-                  <td v-if="idx === 0" :rowspan="rowsOf(cinema).length" class="renew-cell">
-                    <el-switch
-                      :model-value="Boolean(autoRenew[cinema.id])"
-                      size="small"
-                      @update:model-value="(v) => toggleAutoRenew(cinema, v)"
-                    />
-                  </td>
-
                   <td v-if="idx === 0" :rowspan="rowsOf(cinema).length" class="op-cell">
                     <button class="op-link" @click="openParam(cinema)">参数</button>
                     <button class="op-link" @click="openDetail(cinema)">详情</button>
@@ -803,7 +782,7 @@ onUnmounted(() => {
               </template>
 
               <tr v-if="!filteredCinemas.length">
-                <td colspan="7" class="no-result">
+                <td colspan="6" class="no-result">
                   {{ cinemas.length ? '没有匹配的影城' : '该系统下暂无影城' }}
                 </td>
               </tr>
@@ -1252,6 +1231,8 @@ tbody tr:hover td {
 .acc {
   display: flex;
   align-items: center;
+  /* 账号 + 复制按钮作为一个整体居中，和表头「出票账号」对齐 */
+  justify-content: center;
   gap: 4px;
   height: 20px;
 }
@@ -1266,6 +1247,10 @@ tbody tr:hover td {
   color: var(--tx-4);
 }
 
+.acc-cell {
+  text-align: center;
+}
+
 .dim {
   color: var(--tx-4);
 }
@@ -1277,17 +1262,13 @@ tbody tr:hover td {
   color: var(--tx-4);
 }
 
-/* ---- 状态 / 账号 / 自动续期 / 操作：标签与控件一律居中，空值也居中，不往左挤 ---- */
+/* ---- 状态 / 账号 / 操作：标签与控件一律居中，空值也居中，不往左挤 ---- */
 .st-cell,
 .valid-cell {
   text-align: center;
   /* 标签列只放一个 tag，左右各留 10px 会把列撑到刚好截断，收到 6px */
   padding-left: 6px;
   padding-right: 6px;
-}
-
-.renew-cell {
-  text-align: center;
 }
 
 .op-cell {

@@ -1,10 +1,11 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { invoke, on } from '@utils/ipc'
 import { auth, avatarText, displayName, loadAuth, logout } from '@renderer/stores/auth'
 import { proxyStatus, toggleProxy } from '@renderer/stores/proxy'
-import { openSettings } from '@renderer/stores/ui'
+import { caInfo, installCa as installCaCert, refreshCa } from '@renderer/stores/ca'
+import { openSettings, toggleMode, ui } from '@renderer/stores/ui'
 import LoginDialog from '@renderer/components/LoginDialog.vue'
 import SettingsDialog from '@renderer/components/SettingsDialog.vue'
 
@@ -24,13 +25,88 @@ const maximized = ref(false)
 const name = computed(() => displayName())
 const initial = computed(() => avatarText())
 
+/** 未装证书时把原因写进 tooltip，省得用户点下去才发现要先装 */
+const toggleTitle = computed(() => {
+  if (proxyStatus.running) return '停止采集'
+  return caInfo.installed ? '开始采集' : '开始采集（需先安装根证书）'
+})
+
 let offWindowState = null
 
-async function onToggleProxy() {
+/**
+ * 真正去切采集状态。抽出这一层是为了「装完证书继续启动」能复用，
+ * 而不是在拦截分支里再拼一遍 toast 逻辑。错误文案交给调用方决定怎么提示。
+ */
+async function doToggle() {
   const res = await toggleProxy()
-  if (!res) return
-  if (res.error) ElMessage.error(res.error)
-  else ElMessage.success(res.running ? '采集已启动' : '采集已停止')
+  if (!res) return null
+  if (!res.error) ElMessage.success(res.running ? '采集已启动' : '采集已停止')
+  return res
+}
+
+/**
+ * 启动前的证书引导。
+ *
+ * 没装根证书就启动代理是纯粹的假启动：HTTPS 只能隧道直通，解不出 token；
+ * 而且客户端信任链会断，小程序请求反而报错 —— 用户看到的是「采集中」，
+ * 却一条凭证也拿不到。所以这里先拦一道，把「为什么必须装」讲清楚再给安装入口。
+ */
+async function guideInstallCa() {
+  try {
+    await ElMessageBox.confirm(
+      '请先安装证书。',
+      '需要先安装根证书',
+      {
+        confirmButtonText: '安装并启动',
+        cancelButtonText: '取消',
+        type: 'warning',
+        // 弹窗挂在 body 上，别被标题栏的拖动区/固定高度影响布局
+        appendTo: document.body
+      }
+    )
+  } catch {
+    // 用户点了取消或关掉，什么都不做
+    return
+  }
+
+  const res = await installCaCert()
+  if (res?.ok) {
+    ElMessage.success('根证书已安装，正在启动采集')
+    await doToggle()
+    return
+  }
+
+  // 装不上（系统拒绝 / 非 Windows）就别硬启动，把人送到证书页看详情
+  ElMessage.error(res?.message || '根证书安装失败，请到「数据与安全 → 根证书」手动处理')
+  openSettings('ca')
+}
+
+async function onToggleProxy() {
+  if (proxyStatus.busy) return
+
+  /**
+   * 已知没装证书：直接引导，不再先问一遍主进程。
+   *
+   * 原来这里是「点一下 → 先 refreshCa（一次 PowerShell 冷启动，400ms 上下）→ 判断 → 再启动」，
+   * 相当于每次点击都白等半秒。证书装/卸都会刷新状态，窗口重新获得焦点时也会复核，
+   * 缓存足够新；真过期了，主进程那道闸会返回错误，下面照样能把人引导过去。
+   */
+  if (!proxyStatus.running && caInfo.loaded && !caInfo.installed) {
+    await guideInstallCa()
+    return
+  }
+
+  const res = await doToggle()
+  if (!res?.error) return
+
+  // 主进程说证书没装，说明界面状态过期了：复核后引导安装，别只甩一行红字
+  if (/根证书/.test(res.error)) {
+    await refreshCa()
+    await guideInstallCa()
+    return
+  }
+
+  ElMessage.error(res.error)
 }
 
 async function onMinimize() {
@@ -117,9 +193,9 @@ onUnmounted(() => {
       <!-- 采集开关：图标表示下一步做什么，采集中是暂停，已停止是播放 -->
       <button
         class="icon-btn toggle"
-        :class="{ on: proxyStatus.running, busy: proxyStatus.busy }"
-        :title="proxyStatus.running ? '停止采集' : '开始采集'"
-        :aria-label="proxyStatus.running ? '停止采集' : '开始采集'"
+        :class="{ busy: proxyStatus.busy }"
+        :title="toggleTitle"
+        :aria-label="toggleTitle"
         @click="onToggleProxy"
       >
         <svg v-if="proxyStatus.running" viewBox="0 0 24 24" class="fill">
@@ -128,6 +204,20 @@ onUnmounted(() => {
         </svg>
         <svg v-else viewBox="0 0 24 24" class="fill">
           <path d="M8 5.4c0-.8.9-1.3 1.6-.9l9.3 6.6c.6.4.6 1.4 0 1.8l-9.3 6.6c-.7.4-1.6-.1-1.6-.9z" />
+        </svg>
+      </button>
+
+      <!-- 视图切换：影城账号 ↔ 接单平台账号 -->
+      <button
+        class="icon-btn"
+        :class="{ active: ui.mode === 'platform' }"
+        :title="ui.mode === 'platform' ? '切回影城账号' : '接单平台账号'"
+        :aria-label="ui.mode === 'platform' ? '切回影城账号' : '接单平台账号'"
+        @click="toggleMode"
+      >
+        <svg viewBox="0 0 24 24">
+          <path d="M4.4 9.2h12M14.2 6.6l2.6 2.6-2.6 2.6" />
+          <path d="M19.6 14.8h-12M9.8 12.2 7.2 14.8l2.6 2.6" />
         </svg>
       </button>
 
@@ -281,25 +371,39 @@ onUnmounted(() => {
   stroke-linejoin: round;
 }
 
-/* 播放/暂停是主操作，常亮一块浅灰底，和其他纯图标按钮拉开 */
-.icon-btn.toggle {
-  background: var(--bg-hover);
+/* hover 时图标跟着变深，和底色一起给出反馈 */
+.icon-btn:hover svg {
+  stroke: var(--tx);
 }
 
-.icon-btn.toggle:hover {
+/* 当前停在接单平台视图：底色沉一档，和悬停区分开 */
+.icon-btn.active {
   background: var(--bg-active);
+}
+
+.icon-btn.active svg {
+  stroke: var(--tx);
+}
+
+/*
+ * 播放/暂停是实心字形，只吃 fill，不能被上面那条 stroke 描出边。
+ * 参数和齿轮完全一致：不常亮底色、同样的灰，状态只靠字形区分。
+ */
+.icon-btn.toggle svg.fill {
+  /* 两根竖条本身比齿轮窄，尺寸给到 15 才和旁边的图标视觉等重 */
+  width: 15px;
+  height: 15px;
+  fill: var(--tx-3);
+  stroke: none;
+}
+
+.icon-btn.toggle:hover svg.fill {
+  fill: var(--tx);
 }
 
 .icon-btn.toggle.busy {
   opacity: 0.55;
   cursor: default;
-}
-
-.icon-btn.toggle svg.fill {
-  width: 13px;
-  height: 13px;
-  fill: var(--tx);
-  stroke: none;
 }
 
 .vsep {

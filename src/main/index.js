@@ -22,6 +22,8 @@ import CertificateAuthority from './mitm/CertificateAuthority'
 import MitmProxy from './mitm/MitmProxy'
 import SystemProxy from './mitm/SystemProxy'
 import { addBypassHosts } from './mitm/hostBypass'
+import { isCaInstalled } from './mitm/caTrust.js'
+import { installCa } from './mitm/caInstall.js'
 import { launchMiniapp, launchBySearch, parseAppid } from './wx/WxUi'
 import Extractor from './collectors/Extractor'
 import { mergeRules } from './collectors/rules'
@@ -206,8 +208,30 @@ function updateTrayMenu() {
     {
       label: ctx.proxyRunning ? '采集中（点击停止）' : '已停止（点击开始）',
       click: async () => {
-        if (ctx.proxyRunning) await stopProxy()
-        else await startProxy()
+        try {
+          if (ctx.proxyRunning) await stopProxy()
+          else await startProxy()
+        } catch (e) {
+          // 托盘点启动最常见的失败就是根证书没装：把窗口拉起来，问一句要不要现在装
+          log('warn', `启动采集失败：${e.message}`)
+          if (mainWindow) {
+            mainWindow.show()
+            mainWindow.focus()
+          }
+          const { response } = await dialog.showMessageBox(mainWindow || null, {
+            type: 'warning',
+            title: '无法启动采集',
+            message: e.message,
+            buttons: ['去安装', '知道了'],
+            defaultId: 0,
+            cancelId: 1
+          })
+          if (response === 0) {
+            const res = await installCa(ctx.ca, app.getPath('temp'))
+            log(res.ok ? 'info' : 'error', `安装根证书：${res.message}`)
+            if (res.ok) await startProxy().catch((err) => log('error', err.message))
+          }
+        }
         updateTrayMenu()
       }
     },
@@ -749,6 +773,18 @@ async function openEntry(rule, cinema = {}) {
 
 async function startProxy() {
   if (ctx.proxyRunning) return { running: true, port: ctx.proxy.port }
+
+  /**
+   * 没有根证书就起代理 = 假启动。
+   *
+   * 白名单域名的 HTTPS 会被我们自己的 CA 签成客户端不认的证书：小程序请求直接失败，
+   * token 一条也采不到，操作员正在用的页面倒是先坏了。界面显示「采集中」，
+   * 后台干不了活 —— 所以宁可拦住，并且拦在这里：标题栏按钮、托盘菜单、
+   * 开机自动采集、参数抓取启动代理，都归这一个函数管。
+   */
+  if (!(await isCaInstalled(ctx.ca.getFingerprint()))) {
+    throw new Error('根证书未安装，HTTPS 内容无法解密；请先安装根证书再启动采集')
+  }
 
   const port = ctx.config.get('proxy.port') || 9090
   ctx.extractor.setRules(mergeRules(ctx.config.get('rules')))

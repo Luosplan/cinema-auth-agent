@@ -5,7 +5,7 @@ import { proxyStatus, refreshProxyStatus } from '@renderer/stores/proxy'
 import { cinemaStats } from '@renderer/stores/stats'
 import { auth, loadAuth } from '@renderer/stores/auth'
 import { caInfo, refreshCa } from '@renderer/stores/ca'
-import { openSettings } from '@renderer/stores/ui'
+import CaDialog from '@renderer/components/CaDialog.vue'
 
 /**
  * 底部状态栏。
@@ -13,7 +13,7 @@ import { openSettings } from '@renderer/stores/ui'
  * 只放「一直想知道、但不值得占一块版面」的东西：
  * 左下是数据规模，右下是采集状态、证书状态和版本号。
  * 采集开关本身在标题栏，这里只读状态，不重复放按钮；
- * 证书的安装/卸载也统一收进设置弹窗，这里只当入口。
+ * 点证书就地弹小窗装卸，不用先跳设置（设置里那一栏也留着）。
  */
 const version = ref('')
 
@@ -25,14 +25,18 @@ const summary = computed(() => {
 })
 
 const runningText = computed(() => {
+  // 切换要等一次系统代理写入（PowerShell 往返，几百毫秒）：先给个「进行中」，别让按钮像卡住
+  if (proxyStatus.busy) return proxyStatus.running ? '正在停止…' : '正在启动…'
   if (!proxyStatus.running) return '未采集'
   return proxyStatus.port ? `采集中 127.0.0.1:${proxyStatus.port}` : '采集中'
 })
 
-/** 证书点击直接落到设置弹窗的「根证书」那一栏 */
+const caOpen = ref(false)
+
+/** 点证书先当场复核一次再弹窗，别拿着过期状态让人白点一遍 */
 function openCa() {
   refreshCa()
-  openSettings('ca')
+  caOpen.value = true
 }
 
 /**
@@ -90,6 +94,8 @@ onUnmounted(() => {
       <span v-if="version" class="sep"></span>
       <span v-if="version" class="stat ver mono">v{{ version }}</span>
     </div>
+
+    <CaDialog v-model="caOpen" />
   </footer>
 </template>
 

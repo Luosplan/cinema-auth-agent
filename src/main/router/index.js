@@ -1,22 +1,18 @@
 import EventRoute from './EventRoute'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { join } from 'node:path'
 import fs from 'node:fs'
 import { mergeRules } from '../collectors/rules/index.js'
 import { paramDef, resolveForKeys, normalizeKey, describeParams } from '../collectors/ParamResolver.js'
 import { pickValues, listFieldNames } from '../collectors/ParamCollector.js'
 import { isBypassHost } from '../mitm/hostBypass.js'
+import { isCaInstalled, invalidateCaCache } from '../mitm/caTrust.js'
+import { installCa } from '../mitm/caInstall.js'
 import { parseAppid, appletUrl } from '../wx/WxUi'
 
 const exec = promisify(execFile)
-const PS = ['-NoProfile', '-NonInteractive', '-Command']
 
 const routers = []
-
-function ps(script) {
-  return exec('powershell', [...PS, script], { windowsHide: true, timeout: 30000 })
-}
 
 routers.push(
   new EventRoute('auth:status', 'invoke', async (api) => {
@@ -756,6 +752,12 @@ routers.push(
 
 routers.push(
   new EventRoute('proxy:start', 'invoke', async (api) => {
+    /**
+     * 证书闸门在 ctx.startProxy() 里，不在这一层。
+     *
+     * 标题栏按钮、托盘菜单、开机自动采集、参数抓取启动代理走的是同一个 startProxy，
+     * 闸放在那里才拦得住全部入口；这里只负责把异常翻成界面能显示的 error 文案。
+     */
     try {
       return await api.ctx.startProxy()
     } catch (e) {
@@ -862,45 +864,22 @@ routers.push(
     return {
       fingerprint: ctx.ca.getFingerprint(),
       notAfter: ctx.ca.caCert?.validity?.notAfter || null,
-      installed: await checkCaInstalled(ctx.ca.getFingerprint())
+      // 这一路是「界面要看到真话」，绕开缓存
+      installed: await isCaInstalled(ctx.ca.getFingerprint(), { force: true })
     }
   })
 )
 
 routers.push(
   new EventRoute('ca:check', 'invoke', async (api) => {
-    return { installed: await checkCaInstalled(api.ctx.ca.getFingerprint()) }
+    return { installed: await isCaInstalled(api.ctx.ca.getFingerprint(), { force: true }) }
   })
 )
 
 routers.push(
   new EventRoute('ca:install', 'invoke', async (api) => {
-    const { ctx } = api
-    if (process.platform !== 'win32') {
-      return { ok: false, message: '当前系统请手动导入根证书，详见导出的证书文件' }
-    }
-
-    try {
-      const pemPath = join(api.app.getPath('temp'), 'cinema-auth-ca.pem')
-      fs.writeFileSync(pemPath, ctx.ca.getCaPem(), 'utf8')
-
-      // 装到「当前用户」的受信任根，避开 UAC —— 客户机装软件弹管理员授权是大忌
-      const script = [
-        `$path='${pemPath.replace(/'/g, "''")}'`,
-        '$cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($path)',
-        "$store = New-Object System.Security.Cryptography.X509Certificates.X509Store('Root','CurrentUser')",
-        "$store.Open('ReadWrite')",
-        '$store.Add($cert)',
-        '$store.Close()',
-        "'ok'"
-      ].join('\n')
-
-      await ps(script)
-      const installed = await checkCaInstalled(ctx.ca.getFingerprint())
-      return { ok: installed, message: installed ? '证书已安装' : '安装后校验未通过' }
-    } catch (e) {
-      return { ok: false, message: e.message }
-    }
+    // 实现放在 mitm/caInstall.js：托盘菜单「去安装」也要用同一个装法
+    return installCa(api.ctx.ca, api.app.getPath('temp'))
   })
 )
 
@@ -927,10 +906,35 @@ routers.push(
       // 证书本来就不在时 certutil 返回非 0，不算失败，交给下面统一复核
     }
 
-    const installed = await checkCaInstalled(fingerprint)
-    return installed
-      ? { ok: false, message: '卸载未生效，证书仍在受信任的根证书颁发机构里' }
-      : { ok: true, message: '证书已卸载' }
+    // 刚删过，缓存必须作废再复核
+    invalidateCaCache()
+    const installed = await isCaInstalled(fingerprint, { force: true })
+    if (installed) {
+      return { ok: false, message: '卸载未生效，证书仍在受信任的根证书颁发机构里' }
+    }
+
+    /**
+     * 证书没了，采集必须一起停。
+     *
+     * 代理还在跑的话，所有 HTTPS 都会被我们签一张没人信任的证书：
+     * 界面显示「采集中」，实际一条 token 也解不出来，还会把操作员正在用的小程序搞报错。
+     * 这跟「没装证书不许启动」是同一件事的两面，都收在主进程判断，不指望界面记得停。
+     */
+    let stopped = false
+    if (api.ctx.proxyRunning) {
+      try {
+        await api.ctx.stopProxy()
+        stopped = true
+      } catch {
+        /* 停失败也还是要把「证书已卸载」这个事实告诉界面 */
+      }
+    }
+
+    return {
+      ok: true,
+      stopped,
+      message: stopped ? '证书已卸载，采集已停止' : '证书已卸载'
+    }
   })
 )
 
@@ -1053,25 +1057,5 @@ routers.push(
     return { ok: true, enabled: Boolean(enabled) }
   })
 )
-
-/**
- * 判断根证书是否已在「当前用户 / 受信任根」里。
- * 用 SHA1 指纹比对，不比对主题名 —— 主题名可以伪造，指纹不会。
- */
-async function checkCaInstalled(fingerprint) {
-  if (process.platform !== 'win32') return false
-  try {
-    const thumb = fingerprint.replace(/:/g, '')
-    const script = [
-      `$tp='${thumb}'`,
-      "$found = Get-ChildItem Cert:\\CurrentUser\\Root | Where-Object { $_.Thumbprint -eq $tp }",
-      'if ($found) { "yes" } else { "no" }'
-    ].join('\n')
-    const { stdout } = await ps(script)
-    return stdout.trim() === 'yes'
-  } catch {
-    return false
-  }
-}
 
 export default routers

@@ -1,5 +1,6 @@
 import { reactive } from 'vue'
 import { invoke } from '@utils/ipc'
+import { refreshProxyStatus } from './proxy'
 
 /**
  * 根证书状态。
@@ -42,5 +43,7 @@ export async function installCa() {
 export async function uninstallCa() {
   const res = await invoke('ca:uninstall')
   await refreshCa()
+  // 主进程卸载成功会顺手停掉采集，这里立刻同步运行状态，别等下一轮轮询才变灰
+  await refreshProxyStatus()
   return res
 }

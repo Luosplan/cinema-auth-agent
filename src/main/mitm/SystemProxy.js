@@ -10,6 +10,19 @@ function run(cmd, args, opts = {}) {
   return exec(cmd, args, { windowsHide: true, timeout: 20000, ...opts })
 }
 
+/** 从 PowerShell 输出里挑出 `BACKUP={...}` 那一行；解析不出来就返回空备份，绝不抛 */
+export function parseBackup(stdout) {
+  const line = String(stdout || '')
+    .split(/\r?\n/)
+    .find((l) => l.startsWith('BACKUP='))
+  if (!line) return {}
+  try {
+    return JSON.parse(line.slice('BACKUP='.length))
+  } catch {
+    return {}
+  }
+}
+
 /**
  * Windows 的代理设置写在注册表里，但改完必须通知 WinINet 刷新，
  * 否则已经在运行的进程（微信容器进程就在此列）仍然用旧配置。
@@ -114,30 +127,54 @@ export default class SystemProxy {
   async enable(port) {
     if (this.active) await this.disable()
 
-    this.backup = await this.read()
     this.port = port
 
-    if (this.platform === 'win32') await this.enableWindows(port)
-    else if (this.platform === 'darwin') await this.enableMac(port)
+    /**
+     * Windows 上把「备份 → 写入 → 刷新」压进同一个 PowerShell 进程。
+     *
+     * 原来是 read() 一个进程、enableWindows() 又一个进程，每次切换白搭一次
+     * PowerShell 冷启动（实测 400ms 上下）。这两步逻辑上本来就连在一起，
+     * 没有理由分成两次进程。
+     */
+    if (this.platform === 'win32') {
+      this.backup = await this.enableWindows(port)
+      this.active = true
+      return { port, backup: this.backup }
+    }
+
+    this.backup = await this.read()
+
+    if (this.platform === 'darwin') await this.enableMac(port)
     else await this.enableLinux(port)
 
     this.active = true
     return { port, backup: this.backup }
   }
 
+  /** 写入系统代理，同时把原配置一起带回来当备份（一次往返） */
   async enableWindows(port) {
     const server = `127.0.0.1:${port}`
     const override = '<local>;127.*;10.*;172.16.*;192.168.*;localhost'
 
     const script = [
       `$k='${WIN_REG_PATH}'`,
+      '$i = Get-ItemProperty -Path $k -ErrorAction SilentlyContinue',
+      '$backup = [PSCustomObject]@{',
+      '  proxyEnable = [int]$i.ProxyEnable',
+      '  proxyServer = [string]$i.ProxyServer',
+      '  proxyOverride = [string]$i.ProxyOverride',
+      '  autoConfigUrl = [string]$i.AutoConfigURL',
+      '}',
       'Set-ItemProperty -Path $k -Name ProxyEnable -Value 1 -Type DWord',
       `Set-ItemProperty -Path $k -Name ProxyServer -Value '${server}' -Type String`,
       `Set-ItemProperty -Path $k -Name ProxyOverride -Value '${override}' -Type String`,
-      WIN_REFRESH_SNIPPET
+      WIN_REFRESH_SNIPPET,
+      // 带前缀输出，避免和 Add-Type 的其它输出混在一起
+      '"BACKUP=" + ($backup | ConvertTo-Json -Compress)'
     ].join('\n')
 
-    await run('powershell', [...PS, script])
+    const { stdout } = await run('powershell', [...PS, script])
+    return parseBackup(stdout)
   }
 
   async enableMac(port) {
