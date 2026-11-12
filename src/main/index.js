@@ -127,6 +127,8 @@ function createWindow() {
   eventRouter.addApi('log', log)
   // 窗口控制路由要拿当前窗口，用取值函数而不是传对象，避免持有过期引用
   eventRouter.addApi('getWin', () => mainWindow)
+  // 卸载根证书后要立刻停采集，路由里通过 api 拿到同一个 stopProxy
+  eventRouter.addApi('stopProxy', stopProxy)
   eventRouter.addRoutes(routers)
 
   ipcMain.removeAllListeners('renderer-to-main')

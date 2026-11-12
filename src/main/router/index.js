@@ -4,7 +4,7 @@ import { promisify } from 'node:util'
 import { join } from 'node:path'
 import fs from 'node:fs'
 import { pickValues } from '../collectors/ParamCollector.js'
-import { buildCinemaTree, accountsOf } from '../api/cinemaMapper.mjs'
+import { buildCinemaTree, accountsOf, cinemasOfProgram } from '../api/cinemaMapper.mjs'
 
 const exec = promisify(execFile)
 const PS = ['-NoProfile', '-NonInteractive', '-Command']
@@ -55,6 +55,8 @@ routers.push(
 
 // 影城账号：数据来自「程序账号配置」接口，一行 = 一个出票程序（含账号与凭证状态）
 const CONFIGS_PATH = '/ticket-program-account-configs?includeUnconfigured=1&compact=1'
+// 影城字典：带专资号 / 城市 / 地址，详情弹窗靠它把影城清单补全
+const CINEMAS_PATH = '/cinemas'
 
 routers.push(
   new EventRoute('cinemas:tree', 'invoke', async (api) => {
@@ -88,6 +90,47 @@ routers.push(
       const row = list.find((item) => Number(item.program_id) === programId)
       if (!row) return { ok: false, message: '未找到该程序' }
       return { ok: true, lists: accountsOf(row) }
+    } catch (e) {
+      return { ok: false, message: e.message, status: e.status || 0 }
+    }
+  })
+)
+
+/**
+ * 影城字典只拉一次：详情弹窗点十次不该打十次接口。
+ * `/cinemas` 是**当前账号可见**的影城（164 条），程序可能覆盖到账号外的影城 ——
+ * 那些行在详情里保留影城名，专资号 / 地址显示「—」，不做跨账号猜。
+ */
+async function cinemaRegistry(api) {
+  if (!api.ctx.cinemaRegistry) {
+    const rows = await api.ctx.auth.get(CINEMAS_PATH)
+    const byId = new Map()
+    const byName = new Map()
+    for (const item of Array.isArray(rows) ? rows : []) {
+      byId.set(Number(item.id), item)
+      if (item.name) byName.set(item.name, item)
+    }
+    api.ctx.cinemaRegistry = { byId, byName }
+  }
+  return api.ctx.cinemaRegistry
+}
+
+// 详情弹窗：程序覆盖的影城清单（影城名称 / 专资号 / 城市 / 地址）
+routers.push(
+  new EventRoute('cinemas:detail', 'invoke', async (api, data) => {
+    const programId = Number((data.params || {}).programId || 0)
+    if (!programId) return { ok: false, message: '缺少程序 ID' }
+    try {
+      let list = api.ctx.serverCinemas
+      if (!Array.isArray(list)) {
+        const rows = await api.ctx.auth.get(CONFIGS_PATH)
+        list = Array.isArray(rows) ? rows : []
+        api.ctx.serverCinemas = list
+      }
+      const row = list.find((item) => Number(item.program_id) === programId)
+      if (!row) return { ok: false, message: '未找到该程序' }
+      const registry = await cinemaRegistry(api)
+      return { ok: true, cinemas: cinemasOfProgram(row, registry) }
     } catch (e) {
       return { ok: false, message: e.message, status: e.status || 0 }
     }
@@ -297,19 +340,49 @@ routers.push(
 routers.push(
   new EventRoute('ca:uninstall', 'invoke', async (api) => {
     if (process.platform !== 'win32') return { ok: false, message: '暂不支持自动卸载' }
+    const fingerprint = api.ctx.ca.getFingerprint()
+    const thumb = fingerprint.replace(/:/g, '')
+
+    /**
+     * 不能用 PowerShell 的 Remove-Item。
+     *
+     * 用户根存储被系统保护，对 `Cert:\CurrentUser\Root` 的删除会直接抛
+     * 「不允许对用户根存储和 UI 执行操作」，而脚本末尾照样输出 'ok' ——
+     * 结果是界面提示卸载成功、证书还稳稳躺在受信任根里（这就是「卸载没效果」的原因）。
+     * certutil -user 走 CryptoAPI，删当前用户的根证书不需要管理员权限。
+     */
     try {
-      const thumb = api.ctx.ca.getFingerprint().replace(/:/g, '')
-      const script = [
-        `$tp='${thumb}'`,
-        'Get-ChildItem Cert:\\CurrentUser\\Root |',
-        '  Where-Object { $_.Thumbprint -eq $tp } |',
-        '  Remove-Item -Force',
-        "'ok'"
-      ].join('\n')
-      await ps(script)
-      return { ok: true }
-    } catch (e) {
-      return { ok: false, message: e.message }
+      await exec('certutil', ['-user', '-delstore', 'Root', thumb], {
+        windowsHide: true,
+        timeout: 30000
+      })
+    } catch {
+      // 证书本来就不在时 certutil 返回非 0，不算失败，交给下面统一复核
+    }
+
+    const installed = await checkCaInstalled(fingerprint)
+    if (installed) {
+      return { ok: false, message: '卸载未生效，证书仍在受信任的根证书颁发机构里' }
+    }
+
+    /**
+     * 证书没了，采集必须一起停：代理还在跑的话所有 HTTPS 都被签一张没人信任的证书，
+     * 界面显示「采集中」却一条 token 也解不出来，还会把正在用的小程序搞报错。
+     */
+    let stopped = false
+    if (api.ctx.proxyRunning) {
+      try {
+        await api.stopProxy()
+        stopped = true
+      } catch {
+        /* 停失败也还是要把「证书已卸载」这个事实告诉界面 */
+      }
+    }
+
+    return {
+      ok: true,
+      stopped,
+      message: stopped ? '证书已卸载，采集已停止' : '证书已卸载'
     }
   })
 )

@@ -231,6 +231,40 @@ export function buildCinemaTree(rows) {
 }
 
 /**
+ * 程序覆盖的影城清单（详情弹窗那张表）。
+ *
+ * 服务端只给 `cinema_id_names:[{id,name}]`，专资号 / 城市 / 地址要靠 `/cinemas` 字典补。
+ * 连锁程序的 `cinema_cities` 是**去过重的城市串**，跟影城一行对不上，所以只有单影城程序
+ * 才拿它兜底；查不到的字段一律留空，让界面显示「—」，别硬套成别家影城的信息。
+ */
+export function cinemasOfProgram(row, registry) {
+  if (!row) return []
+  const byId = registry?.byId || new Map()
+  const byName = registry?.byName || new Map()
+  const items =
+    Array.isArray(row.cinema_id_names) && row.cinema_id_names.length
+      ? row.cinema_id_names.map((c) => ({ id: Number(c.id) || 0, name: c.name || '' }))
+      : [{ id: 0, name: row.name || '' }]
+  const stds = String(row.cinema_standard_ids || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const single = items.length === 1
+  return items.map((item, index) => {
+    const hit = (item.id && byId.get(item.id)) || byName.get(item.name) || null
+    return {
+      id: item.id || Number(hit?.id) || 0,
+      name: item.name || hit?.name || '',
+      // 专资号列表和影城列表等长时按位置配对，否则只能靠字典
+      standardId: hit?.standard_id || (stds.length === items.length ? stds[index] : '') || '',
+      city: hit?.city || (single ? row.cinema_cities || row.city || '' : '') || '',
+      // 字典的 address 常为空，凭证里的登记地址能兜一层（同一家影城的地址）
+      address: hit?.address || hit?.credentials?.registryCinemaAddress || ''
+    }
+  })
+}
+
+/**
  * 一个程序 → 0 或 1 个出票账号。
  *
  * 新数据源里账号就挂在程序上：`account_count` 为 0 表示这个程序还没配账号

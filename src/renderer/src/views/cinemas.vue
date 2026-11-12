@@ -141,12 +141,6 @@ function typeText(cinema) {
   return cinema?.accessType || cinema?.protocol || '—'
 }
 
-function priorityText(acc) {
-  const p = Number(acc?.priority || 0)
-  if (!p) return ''
-  return p === 1 ? '首选' : `#${p}`
-}
-
 async function loadTree() {
   loading.value = true
   error.value = ''
@@ -207,12 +201,49 @@ async function openParam(cinema) {
   paramDialog.value = true
 }
 
-function openDetail(cinema) {
+/**
+ * 详情：只放「这是什么程序」+「它覆盖哪些影城」。
+ * 影城清单要专资号 / 地址，得回主进程再补一次（树里只有影城 id 和名字）。
+ */
+async function openDetail(cinema) {
   dialogCinema.value = cinema
+  detailCinemas.value = []
   detailDialog.value = true
+  detailLoading.value = true
+  try {
+    const res = await invoke('cinemas:detail', { programId: cinema.programId || cinema.id })
+    if (res?.ok) detailCinemas.value = res.cinemas || []
+    else ElMessage.error(res?.message || '读取影城信息失败')
+  } catch (e) {
+    ElMessage.error(e.message || '读取影城信息失败')
+  } finally {
+    detailLoading.value = false
+  }
 }
 
-const dialogAccounts = computed(() => (dialogCinema.value ? rowsOf(dialogCinema.value) : []))
+/** 详情弹窗的影城清单：每行 { name, standardId, city, address } */
+const detailCinemas = ref([])
+const detailLoading = ref(false)
+
+/**
+ * 详情表格的列：整列都没值就不显示。
+ * 连锁程序动辄上百家影城，大部分没在后台登记专资号/地址，全画出来就是一屏「—」。
+ */
+const detailColumns = computed(() => {
+  const cols = [{ key: 'name', label: '影城名称' }]
+  if (detailCinemas.value.some((c) => c.standardId)) cols.push({ key: 'standardId', label: '专资号' })
+  if (detailCinemas.value.some((c) => c.city)) cols.push({ key: 'city', label: '城市' })
+  if (detailCinemas.value.some((c) => c.address)) cols.push({ key: 'address', label: '地址' })
+  return cols
+})
+
+/** 列宽：table-layout 是 fixed，列数变了就得给一套对得上的百分比 */
+const DETAIL_WIDTHS = {
+  1: ['100%'],
+  2: ['62%', '38%'],
+  3: ['52%', '24%', '24%'],
+  4: ['40%', '20%', '14%', '26%']
+}
 
 /**
  * captureConfig 是「抓包字段清单」：`[{ label: '手机号', key: 'mobile', required: true }]`。
@@ -385,7 +416,8 @@ onMounted(async () => {
         <!-- 左：出票系统 -->
         <aside class="systems">
           <div class="systems-title">
-            出票系统<span class="sys-total">{{ tree.length }}</span>
+            <span>出票系统</span>
+            <span class="sys-total">{{ tree.length }}</span>
           </div>
           <div class="sys-list">
             <div
@@ -401,9 +433,6 @@ onMounted(async () => {
               <span class="sys-name">{{ sys.name }}</span>
               <span class="sys-count">{{ sys.children?.length || 0 }}</span>
             </div>
-          </div>
-          <div class="systems-foot">
-            共 {{ cinemas.length }} 个程序 · {{ totalAccounts }} 个账号
           </div>
         </aside>
 
@@ -550,36 +579,62 @@ onMounted(async () => {
       </template>
     </el-dialog>
 
-    <!-- 详情 -->
-    <el-dialog v-model="detailDialog" title="影城详情" width="560px" align-center>
+    <!-- 详情：程序是谁 + 它覆盖哪些影城（账号的事在上面的参数弹窗/主表里，不在这里重复） -->
+    <el-dialog v-model="detailDialog" title="详情" width="640px" align-center>
       <div v-if="dialogCinema" class="dlg">
-        <div class="dlg-row"><span class="k">影城</span><span class="v">{{ dialogCinema.name }}</span></div>
-        <div class="dlg-row"><span class="k">编码</span><span class="v mono">{{ dialogCinema.code || '—' }}</span></div>
+        <div class="dlg-row">
+          <span class="k">名称</span>
+          <span class="v">{{ dialogCinema.name || '—' }}</span>
+        </div>
+        <div class="dlg-row">
+          <span class="k">系统</span>
+          <span class="v">{{ activeSystem?.name || dialogCinema.systemCode || '—' }}</span>
+        </div>
 
         <div class="dlg-block">
-          <div class="k">出票账号</div>
-          <table class="mini">
-            <thead>
-              <tr>
-                <th>账号</th>
-                <th>优先</th>
-                <th>状态</th>
-                <th>会员卡</th>
-                <th>优惠券</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(acc, i) in dialogAccounts" :key="i">
-                <td class="mono">{{ acc?.accountId || '—' }}</td>
-                <td>{{ priorityText(acc) || '—' }}</td>
-                <td>{{ acc ? (isEnabled(acc) ? '启用' : '停用') : '—' }}</td>
-                <td>{{ acc?.memberCardCount ?? '—' }}</td>
-                <td>{{ acc?.couponCount ?? '—' }}</td>
-              </tr>
-            </tbody>
-          </table>
+          <div class="k">影城 {{ detailCinemas.length ? `（${detailCinemas.length}）` : '' }}</div>
+          <div class="mini-wrap">
+            <table class="mini cinema-table">
+              <colgroup>
+                <col
+                  v-for="(col, i) in detailColumns"
+                  :key="col.key"
+                  :style="{ width: DETAIL_WIDTHS[detailColumns.length][i] }"
+                />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th v-for="col in detailColumns" :key="col.key">{{ col.label }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(item, i) in detailCinemas" :key="i">
+                  <td
+                    v-for="col in detailColumns"
+                    :key="col.key"
+                    :class="{ mono: col.key === 'standardId' }"
+                    :title="item[col.key] || ''"
+                  >
+                    {{ item[col.key] || '—' }}
+                  </td>
+                </tr>
+                <tr v-if="!detailCinemas.length">
+                  <td :colspan="detailColumns.length" class="mini-empty">
+                    {{ detailLoading ? '读取中…' : '没有关联影城' }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-if="detailCinemas.length && detailColumns.length === 1" class="mini-hint">
+            这些影城在后台还没有登记专资号 / 城市 / 地址
+          </div>
         </div>
       </div>
+
+      <template #footer>
+        <el-button size="small" @click="detailDialog = false">关闭</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
@@ -664,11 +719,12 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   padding: 0 10px 16px 16px;
-  background: var(--bg);
   border-right: 1px solid var(--line);
 }
 
 .systems-title {
+  display: flex;
+  justify-content: space-between;
   flex-shrink: 0;
   padding: 0 8px 6px;
   font-size: 11px;
@@ -737,15 +793,6 @@ onMounted(async () => {
 .sys-item.active .sys-count {
   color: var(--accent);
   opacity: 0.75;
-}
-
-.systems-foot {
-  flex-shrink: 0;
-  margin-top: 8px;
-  padding: 8px 8px 0;
-  border-top: 1px solid var(--line-soft);
-  font-size: 10.5px;
-  color: var(--tx-4);
 }
 
 /* ---- 表格 ---- */
@@ -1038,5 +1085,41 @@ tbody tr:hover td {
   font-size: 12px;
   color: var(--tx-2);
   border-bottom: 1px solid var(--line-soft);
+}
+
+/* 详情里的影城表：连锁程序能有一百多家，表格自己滚，弹窗别被撑到屏幕外 */
+.mini-wrap {
+  max-height: 320px;
+  overflow: auto;
+}
+
+.cinema-table {
+  table-layout: fixed;
+}
+
+.cinema-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding-top: 6px;
+  background: var(--bg);
+}
+
+.cinema-table td {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-empty {
+  padding: 18px 0 !important;
+  text-align: center;
+  color: var(--tx-4);
+}
+
+.mini-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--tx-4);
 }
 </style>
