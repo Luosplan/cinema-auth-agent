@@ -8,7 +8,8 @@ import {
   buildCinemaTree,
   expandProgramToCinemas,
   accountsOf,
-  cinemasOfProgram
+  cinemasOfProgram,
+  paramSchemaOf
 } from '../api/cinemaMapper.mjs'
 
 const exec = promisify(execFile)
@@ -60,6 +61,8 @@ routers.push(
 
 // 影城账号：数据来自「程序账号配置」接口，一行 = 一个出票程序（含账号与凭证状态）
 const CONFIGS_PATH = '/ticket-program-account-configs?includeUnconfigured=1&compact=1'
+// 单个程序：加 programId 才会回 config_schema（字段声明），参数弹窗必须走这个
+const CONFIG_PATH = '/ticket-program-account-configs?includeUnconfigured=1'
 // 影城字典：带专资号 / 城市 / 地址，详情弹窗靠它把影城清单补全
 const CINEMAS_PATH = '/cinemas'
 
@@ -100,6 +103,29 @@ routers.push(
       const row = list.find((item) => Number(item.program_id) === programId)
       if (!row) return { ok: false, message: '未找到该程序' }
       return { ok: true, lists: accountsOf(row) }
+    } catch (e) {
+      return { ok: false, message: e.message, status: e.status || 0 }
+    }
+  })
+)
+
+/**
+ * 参数弹窗：单个程序的抓包参数（字段声明 + 服务端已存的值）。
+ *
+ * 必须按 programId 单查：列表接口带的是 compact=1，只有值没有 `config_schema`，
+ * 靠凭证键名反推会得到 phone / mobile / mobileNumber 一堆同义字段，
+ * 真正要抓的 appletToken 反而看不出是必填（重明鸟3.0 就是这种情况）。
+ */
+routers.push(
+  new EventRoute('cinemas:param', 'invoke', async (api, data) => {
+    const programId = Number((data.params || {}).programId || 0)
+    if (!programId) return { ok: false, message: '缺少程序 ID' }
+    try {
+      const rows = await api.ctx.auth.get(`${CONFIG_PATH}&programId=${programId}`)
+      const list = Array.isArray(rows) ? rows : []
+      const row = list.find((item) => Number(item.program_id) === programId) || list[0]
+      if (!row) return { ok: false, message: '未找到该程序' }
+      return { ok: true, ...paramSchemaOf(row) }
     } catch (e) {
       return { ok: false, message: e.message, status: e.status || 0 }
     }

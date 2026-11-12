@@ -157,6 +157,56 @@ export function captureConfigOf(credentials) {
 }
 
 /**
+ * 单个程序的「抓包参数」清单（参数弹窗的数据源）。
+ *
+ * 必须走 `GET /api/ticket-program-account-configs?includeUnconfigured=1&programId=<id>`：
+ * 只有这个接口会把 `config_schema.fields` 带全（label / required / type / help），
+ * 列表接口的 compact=1 只回值不回声明，靠 `credentials` 的键名反推会得到
+ * phone / mobile / phoneNumber 一堆同义字段，真正要抓的 appletToken 反而看不出必填。
+ *
+ * 返回值：{ account, fields: [{ key, label, required, type, help, value }] }
+ * `value` 取服务端已存的凭证（运营点开就能看到现在用的是哪个 token）。
+ */
+export function paramSchemaOf(row) {
+  const schema = row?.config_schema || row?.configSchema || {}
+  const credentials =
+    row?.user_credentials && Object.keys(row.user_credentials).length
+      ? row.user_credentials
+      : row?.credentials || {}
+  const account = String(row?.account_name || '')
+
+  const declared = Array.isArray(schema.fields) ? schema.fields : []
+  const fields = declared
+    .filter((item) => item && typeof item === 'object')
+    .map((item, i) => {
+      const key = String(item.key || item.label || `参数${i + 1}`)
+      return {
+        key,
+        label: String(item.label || key),
+        required: typeof item.required === 'boolean' ? item.required : null,
+        type: String(item.type || ''),
+        help: String(item.help || ''),
+        value: credentials[key] === null || credentials[key] === undefined ? '' : String(credentials[key])
+      }
+    })
+
+  // 程序没声明 config_schema（老数据）才退回凭证键，否则会混进一堆同义手机号字段
+  if (fields.length) return { account, fields }
+  for (const [key, value] of Object.entries(credentials)) {
+    if (value === null || value === undefined || value === '') continue
+    fields.push({
+      key,
+      label: CREDENTIAL_LABELS[key] || key,
+      required: null,
+      type: '',
+      help: '',
+      value: String(value)
+    })
+  }
+  return { account, fields }
+}
+
+/**
  * 服务端「程序账号配置」行 → 界面要的 { id, name, children[] } 两级树。
  *
  * 数据源是 `GET /api/ticket-program-account-configs?includeUnconfigured=1&compact=1`：

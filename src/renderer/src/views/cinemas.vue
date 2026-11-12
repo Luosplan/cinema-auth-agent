@@ -209,11 +209,30 @@ async function loadAccounts(list) {
   accountsLoading.value = false
 }
 
+/**
+ * 参数：字段声明和当前值都来自「单程序」配置接口（带 programId 才有 config_schema）。
+ * 树里那份 captureConfig 是按凭证键名反推的，phone / mobile / phoneNumber 各占一行，
+ * 真正要抓的 appletToken 反倒看不出是必填。
+ */
 async function openParam(cinema) {
   dialogCinema.value = cinema
-  // 每次打开都是「这次抓到的」，不要把上一家的值带过来
-  paramValues.value = {}
+  paramFields.value = []
+  paramAccount.value = ''
   paramDialog.value = true
+  paramLoading.value = true
+  try {
+    const res = await invoke('cinemas:param', { programId: cinema.programId || cinema.id })
+    if (!res?.ok) {
+      ElMessage.error(res?.message || '读取参数失败')
+      return
+    }
+    paramAccount.value = res.account || ''
+    paramFields.value = Array.isArray(res.fields) ? res.fields : []
+  } catch (e) {
+    ElMessage.error(e.message || '读取参数失败')
+  } finally {
+    paramLoading.value = false
+  }
 }
 
 /**
@@ -261,76 +280,46 @@ const DETAIL_WIDTHS = {
 }
 
 /**
- * captureConfig 是「抓包字段清单」：`[{ label: '手机号', key: 'mobile', required: true }]`。
- * 表里给运营看的是 label（手机号），抓包按 key（mobile）去匹配，两者都得留着。
+ * 参数弹窗的行：`{ key, label, required, type, help, value }`。
+ * label 给人看，key 是抓包匹配用的字段名，两个都得留着；
+ * value 是服务端已存的凭证，点开就能看到现在用的是哪个 token。
  */
-const dialogParamRows = computed(() => {
-  const cfg = dialogCinema.value?.captureConfig
-  if (!cfg || typeof cfg !== 'object') return []
+const paramFields = ref([])
+/** 这个程序绑定的出票账号，放在标题里，免得点开还得回去看表格 */
+const paramAccount = ref('')
+const paramLoading = ref(false)
 
-  const list = Array.isArray(cfg) ? cfg : Array.isArray(cfg.fields) ? cfg.fields : null
-  if (list) {
-    return list
-      .filter((item) => item && typeof item === 'object')
-      .map((item, i) => {
-        const key = String(item.key || item.label || `参数${i + 1}`)
-        return {
-          key,
-          label: String(item.label || key),
-          required: typeof item.required === 'boolean' ? item.required : null
-        }
-      })
-  }
-
-  // 兜底：普通键值对象，字段名就是它的 key，没有 label
-  return Object.keys(cfg).map((key) => ({ key, label: key, required: null }))
-})
-
-/** 抓包拿到的值，key → value；打开弹窗时清空，点「获取参数」才填 */
-const paramValues = ref({})
-const capturing = ref(false)
-
-async function captureParams() {
+/** 重新读一次接口：换了 token 之后不用关弹窗再点进来 */
+async function reloadParams() {
   const cinema = dialogCinema.value
   if (!cinema) return
-  const keys = dialogParamRows.value.map((row) => row.key)
-  if (!keys.length) {
-    ElMessage.warning('该影城没有配置抓包参数')
-    return
-  }
-
-  capturing.value = true
+  paramLoading.value = true
   try {
-    const res = await invoke('cinemas:capture-params', {
-      keys,
-      systemCode: cinema.systemCode || '',
-      waitMs: 25000
-    })
+    const res = await invoke('cinemas:param', { programId: cinema.programId || cinema.id })
     if (!res?.ok) {
-      ElMessage.error(res?.message || '获取失败')
+      ElMessage.error(res?.message || '读取参数失败')
       return
     }
-    const values = res.values || {}
-    paramValues.value = { ...paramValues.value, ...values }
-    const got = Object.keys(values).length
-    if (!got) {
-      ElMessage.warning('这次没有抓到数据，请在「抓包日志」里确认有该系统的请求')
-    } else if (res.missing?.length) {
-      ElMessage.warning(`已获取 ${got} 个参数，${res.missing.length} 个还没抓到`)
-    } else {
-      ElMessage.success(`已获取 ${got} 个参数`)
-    }
+    paramAccount.value = res.account || ''
+    paramFields.value = Array.isArray(res.fields) ? res.fields : []
   } catch (e) {
-    ElMessage.error(e.message || '获取失败')
+    ElMessage.error(e.message || '读取参数失败')
   } finally {
-    capturing.value = false
+    paramLoading.value = false
   }
 }
 
-/** 提示里用 label（手机号），不要甩出 key（mobile）——页面上给人看的是前者
- *  还没抓到值时也能复制，退回复制参数名称，不留一个点不动的按钮 */
+/** 标题带上「哪个程序 + 哪套账号」：同一系统几十个程序，光看影城名容易搞混 */
+const paramTitle = computed(() => {
+  const cinema = dialogCinema.value
+  if (!cinema) return '影城参数'
+  const name = cinema.programName || cinema.name || ''
+  return paramAccount.value ? `影城参数 · ${name}（${paramAccount.value}）` : `影城参数 · ${name}`
+})
+
+/** 复制当前值；没有值时退回复制字段名，不留一个点不动的按钮 */
 async function copyParam(row) {
-  const text = paramValues.value[row.key] || row.label
+  const text = String(row.value || row.key || row.label || '')
   const ok = await writeClipboard(text)
   if (ok) ElMessage.success(`复制 ${row.label} 成功`)
   else ElMessage.warning('剪贴板不可用，请检查系统权限')
@@ -547,14 +536,9 @@ onMounted(async () => {
     <LoginDialog v-model="loginOpen" @success="reload" />
 
     <!-- 参数：只留采集参数表，影城信息挪到标题里，省掉六行占位 -->
-    <el-dialog
-      v-model="paramDialog"
-      :title="dialogCinema ? `影城参数 · ${dialogCinema.name}` : '影城参数'"
-      width="600px"
-      align-center
-    >
+    <el-dialog v-model="paramDialog" :title="paramTitle" width="600px" align-center>
       <div v-if="dialogCinema" class="dlg">
-        <div v-if="dialogParamRows.length" class="param-wrap">
+        <div v-if="paramFields.length" class="param-wrap">
           <table class="param-table">
             <thead>
               <tr>
@@ -565,10 +549,13 @@ onMounted(async () => {
               </tr>
             </thead>
             <tbody>
-              <tr v-for="row in dialogParamRows" :key="row.key">
-                <td :title="row.label">{{ row.label }}</td>
-                <td class="mono p-val" :title="paramValues[row.key] || ''">
-                  <span v-if="paramValues[row.key]">{{ paramValues[row.key] }}</span>
+              <tr v-for="row in paramFields" :key="row.key">
+                <td :title="row.help || row.label">
+                  <div class="p-label">{{ row.label }}</div>
+                  <div v-if="row.help" class="p-help" :title="row.help">{{ row.help }}</div>
+                </td>
+                <td class="mono p-val" :title="row.value || ''">
+                  <span v-if="row.value">{{ row.value }}</span>
                   <span v-else class="dim">—</span>
                 </td>
                 <td class="p-required">
@@ -583,16 +570,15 @@ onMounted(async () => {
             </tbody>
           </table>
         </div>
-        <div v-else class="empty-cell">该影城没有额外的采集参数</div>
-        <div v-if="capturing" class="p-hint">
-          正在抓包，请在该系统的 H5 / 小程序里登录一次，抓到值会自动回填…
+        <div v-else class="empty-cell">
+          {{ paramLoading ? '读取中…' : '该影城没有配置抓包参数' }}
         </div>
       </div>
 
       <template #footer>
-        <el-button size="small" @click="paramDialog = false">取消</el-button>
-        <el-button size="small" type="primary" :loading="capturing" @click="captureParams">
-          获取参数
+        <el-button size="small" @click="paramDialog = false">关闭</el-button>
+        <el-button size="small" type="primary" :loading="paramLoading" @click="reloadParams">
+          刷新
         </el-button>
       </template>
     </el-dialog>
@@ -1064,6 +1050,22 @@ tbody tr:hover td {
   color: var(--tx);
 }
 
+/* 字段说明（怎么抓、有效期、别填旧版的哪个 token）：压淡、单行截断，靠 title 看全文 */
+.p-label {
+  color: var(--tx-2);
+}
+
+.p-help {
+  max-width: 210px;
+  margin-top: 2px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--tx-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* 必填的「是」给正文色，否 / 未标注压淡——一眼能看出哪些字段不能漏 */
 .p-yes {
   color: var(--tx);
@@ -1073,14 +1075,6 @@ tbody tr:hover td {
 .p-op,
 .p-required {
   text-align: center;
-}
-
-/* 抓包进行中的提示，放在表格下面，别挤进表格里 */
-.p-hint {
-  margin-top: 8px;
-  font-size: 11px;
-  line-height: 1.6;
-  color: var(--tx-4);
 }
 
 .mini {
