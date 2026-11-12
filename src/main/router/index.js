@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
 import fs from 'node:fs'
-import { pickValues } from '../collectors/ParamCollector.js'
+import { pickValues, describeTraffic } from '../collectors/ParamCollector.js'
 import { checkCaInstalled, probeCaInstalled } from '../mitm/CaTrust.js'
 import { parseProxyServer } from '../mitm/SystemProxy.js'
 import {
@@ -278,12 +278,17 @@ routers.push(
         hasHosts ? ctx.extractor.hostMatches(rule, record.host) : Boolean(record.host)
       // 只回扫最近 200 条：更早的基本是别的系统，翻全量没意义还慢
       let scanned = Math.max(0, ctx.captures.length - 200)
+      /** 留一份命中的记录用于事后诊断（字段名对不上时靠它说清楚） */
+      const accepted = []
       const scanNew = () => {
         const list = ctx.captures
         if (list.length < scanned) scanned = 0 // 缓冲被截断过，从头再扫
         for (let i = scanned; i < list.length; i += 1) {
           const record = list[i]
-          if (accept(record)) Object.assign(values, pickValues(record, keys))
+          if (!accept(record)) continue
+          accepted.push(record)
+          if (accepted.length > 120) accepted.shift()
+          Object.assign(values, pickValues(record, keys))
         }
         scanned = list.length
       }
@@ -333,10 +338,22 @@ routers.push(
       // 停止或超时前最后扫一遍：跳出循环到返回之间可能刚好有新流量进来
       scanNew()
 
+      const missing = keys.filter((key) => !values[key])
+
+      /**
+       * 有字段没对上时，顺手把这次见到的域名 / cookie / 头 / 字段名带回去。
+       * 参数名对不上才是常态（后台写 phone，接口里叫 loginId），
+       * 只说「没抓到」没法判断是没流量还是名字不对，界面把这份线索摆出来就能一次定位。
+       */
+      if (missing.length) {
+        api.log('warn', `抓包未凑齐：缺 ${missing.join('、')}（命中记录 ${accepted.length} 条）`)
+      }
+
       return {
         ok: true,
         values,
-        missing: keys.filter((key) => !values[key]),
+        missing,
+        hints: missing.length ? describeTraffic(accepted) : null,
         // 用户点了「停止」而不是等满窗口：界面提示要说「保留已抓到的」，不算失败
         stopped,
         proxyRunning: ctx.proxyRunning,

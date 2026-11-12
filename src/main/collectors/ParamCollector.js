@@ -9,6 +9,28 @@
 const MAX_BODY_CHARS = 512 * 1024
 const MAX_DEPTH = 6
 
+/**
+ * 「手机号」这一栏的别名。
+ *
+ * 各家的登录接口几乎都不叫 phone：凤凰云智是 loginId，别的系统还有 loginName / account。
+ * 这些名字本身太泛（account 完全可能是商户号），所以别名命中后还要求**值长得像手机号**
+ * 才采用 —— 宁可空着让用户重抓，也不能往登录凭证里塞一个错值。
+ */
+const PHONE_ORIGIN_KEYS = new Set(['phone', 'mobile', 'tel', 'phonenumber', 'mobileno', '手机号'])
+const PHONE_ALIAS_KEYS = new Set([
+  'loginid',
+  'loginname',
+  'loginaccount',
+  'account',
+  'username',
+  'useraccount',
+  'mobilenumber',
+  'mobilephone',
+  'telphone',
+  'phonecode'
+])
+const PHONE_VALUE_RE = /^\+?\d[\d-]{5,18}$/
+
 /** 一条记录里能对上多少个字段，就返回多少个 */
 export function pickValues(record, keys) {
   /**
@@ -20,13 +42,28 @@ export function pickValues(record, keys) {
   const out = {}
   if (!record || !wanted.size) return out
 
+  // 这次要抓的字段里，哪个是「手机号」那一栏（没有就是 null）
+  const phoneOrigin =
+    [...wanted.values()].find((key) => PHONE_ORIGIN_KEYS.has(normKey(key))) || null
+
   const put = (key, value) => {
-    const origin = wanted.get(normKey(key))
-    if (!origin || value === undefined || value === null) return
+    if (value === undefined || value === null) return
     const text = typeof value === 'object' ? safeStringify(value) : String(value).trim()
     if (!text) return
-    // 记录按时间从旧到新遍历，后写的覆盖先写的，留下的就是最近一次看到的值
-    out[origin] = text
+
+    const direct = wanted.get(normKey(key))
+    if (direct) {
+      // 记录按时间从旧到新遍历，后写的覆盖先写的，留下的就是最近一次看到的值
+      out[direct] = text
+      return
+    }
+
+    // 别名兜底：仅手机号栏，且值必须像手机号
+    if (phoneOrigin && !out[phoneOrigin]) {
+      if (PHONE_ALIAS_KEYS.has(normKey(key)) && PHONE_VALUE_RE.test(text)) {
+        out[phoneOrigin] = text
+      }
+    }
   }
 
   // 1. URL 查询串
@@ -54,13 +91,31 @@ export function pickValues(record, keys) {
     })
   }
 
+  /**
+   * 2.5 Set-Cookie：服务端**下发**的那一份。
+   *
+   * 这一路原来完全没读，而 H5 登录的 sid / tid 恰恰是登录成功响应里 Set-Cookie 下来的：
+   * 用户登录完立刻点「获取参数」时，浏览器还没带着新 cookie 发下一个请求，
+   * 只认「请求 cookie」就永远是空的。
+   */
+  eachSetCookie(record.resHeaders, put)
+
   // 3. 请求头 / 响应头本身可能就是字段（larkSid 这类自定义头）
   eachHeader(record.reqHeaders, put)
   eachHeader(record.resHeaders, put)
 
-  // 4. JSON 体：请求体（登录提交的账号）优先，响应体兜底
-  walkJson(parseJsonSafe(record.reqBody), put, 0)
-  walkJson(parseJsonSafe(record.resBody), put, 0)
+  /**
+   * 4. 请求体 / 响应体。
+   * 先按 JSON 走；不是 JSON 就按 form-urlencoded 解 —— 安卓/H5 登录表单是
+   * `loginId=138xxx&password=...` 这种，原来是整段丢掉，手机号自然抓不到。
+   */
+  const reqJson = parseJsonSafe(record.reqBody)
+  if (reqJson) walkJson(reqJson, put, 0)
+  else parseFormSafe(record.reqBody, put)
+
+  const resJson = parseJsonSafe(record.resBody)
+  if (resJson) walkJson(resJson, put, 0)
+  else parseFormSafe(record.resBody, put)
 
   return out
 }
@@ -104,6 +159,51 @@ function walkJson(node, put, depth) {
       return
     }
     put(key, value)
+    // mtop / 部分 H5 会把参数再套一层，字面量是 JSON 字符串（data='{"loginId":"..."}'）
+    if (typeof value === 'string' && value.length < 200000) {
+      const trimmed = value.trim()
+      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        const inner = parseJsonSafe(trimmed)
+        if (inner) walkJson(inner, put, depth + 1)
+      }
+    }
+  })
+}
+
+/** Set-Cookie 可能有多个（Node 里是数组），每个只取 `name=value` 那一段 */
+function eachSetCookie(headers, put) {
+  if (!headers) return
+  const key = Object.keys(headers).find((k) => k.toLowerCase() === 'set-cookie')
+  if (!key) return
+  const raw = headers[key]
+  const list = Array.isArray(raw) ? raw : splitSetCookie(String(raw || ''))
+  list.forEach((entry) => {
+    const first = String(entry).split(';')[0]
+    const eq = first.indexOf('=')
+    if (eq <= 0) return
+    put(first.slice(0, eq).trim(), first.slice(eq + 1).trim())
+  })
+}
+
+/**
+ * 把一整串 Set-Cookie 拆成多条。
+ * 不能在所有逗号上切：`Expires=Wed, 21 Oct 2026 07:28:00 GMT` 本身就带逗号，
+ * 只有「逗号后面紧跟 name=」才是新的一条。
+ */
+function splitSetCookie(raw) {
+  return raw.split(/,(?=\s*[^;,=\s]+=)/)
+}
+
+/** form-urlencoded：a=1&b=2，解码后按字段名对齐 */
+function parseFormSafe(text, put) {
+  const body = typeof text === 'string' ? text.trim() : ''
+  if (!body || body.length > MAX_BODY_CHARS) return
+  if (!/^[^\s=&]+=[^&]*(&|$)/.test(body)) return
+  body.split('&').forEach((pair) => {
+    if (!pair) return
+    const eq = pair.indexOf('=')
+    if (eq <= 0) return
+    put(decodeSafe(pair.slice(0, eq)), decodeSafe(pair.slice(eq + 1)))
   })
 }
 
@@ -135,4 +235,66 @@ function safeStringify(value) {
   }
 }
 
-export default { pickValues }
+/**
+ * 没抓到时给人看的线索：这段时间到底经过哪些域名、出现过哪些 cookie / 头 / 字段名。
+ *
+ * 参数名是后台 schema 写死的，流量里的名字经常是另一个写法（phone vs loginId、
+ * larkSid vs lark_sid）。光说「没抓到」没法判断是没流量还是名字对不上，
+ * 把见到的名字抖出来，一次就能定位。
+ */
+export function describeTraffic(records) {
+  const hosts = new Set()
+  const names = new Set()
+
+  const pushName = (name) => {
+    const text = String(name || '').trim()
+    if (text && text.length <= 40) names.add(text)
+  }
+  const pushPairs = (text, sep) => {
+    String(text || '')
+      .split(sep)
+      .forEach((pair) => {
+        const eq = pair.indexOf('=')
+        if (eq > 0) pushName(pair.slice(0, eq).trim())
+      })
+  }
+
+  ;(records || []).forEach((record) => {
+    if (!record) return
+    if (record.host) hosts.add(record.host)
+
+    pushPairs(headerOf(record.reqHeaders, 'cookie'), ';')
+
+    const setCookie = headerOf(record.resHeaders, 'set-cookie')
+    if (setCookie) {
+      splitSetCookie(setCookie).forEach((entry) => pushPairs(entry, ';'))
+    }
+
+    Object.keys(record.reqHeaders || {}).forEach(pushName)
+    Object.keys(record.resHeaders || {}).forEach(pushName)
+
+    const reqJson = parseJsonSafe(record.reqBody)
+    if (reqJson) collectKeys(reqJson, pushName, 0)
+    else pushPairs(record.reqBody, '&')
+
+    const resJson = parseJsonSafe(record.resBody)
+    if (resJson) collectKeys(resJson, pushName, 0)
+  })
+
+  return { hosts: [...hosts].slice(0, 10), names: [...names].slice(0, 40) }
+}
+
+function collectKeys(node, push, depth) {
+  if (!node || typeof node !== 'object' || depth > 3) return
+  if (Array.isArray(node)) {
+    node.slice(0, 5).forEach((item) => collectKeys(item, push, depth + 1))
+    return
+  }
+  Object.keys(node).forEach((key) => {
+    push(key)
+    const value = node[key]
+    if (value && typeof value === 'object') collectKeys(value, push, depth + 1)
+  })
+}
+
+export default { pickValues, describeTraffic }

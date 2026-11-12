@@ -221,6 +221,8 @@ async function openParam(cinema) {
   paramFields.value = []
   paramValues.value = {}
   paramAccounts.value = []
+  // 上一轮的抓包线索不能带到这一轮，否则看着像这次抓到的
+  paramHints.value = null
   paramDialog.value = true
   await loadParamFields(cinema)
 }
@@ -299,6 +301,12 @@ const paramLoading = ref(false)
 const capturing = ref(false)
 /** 点了停止、等主进程把已抓到的值带回来：按钮要禁用，避免连点 */
 const stopping = ref(false)
+/** 抓包没凑齐时主进程带回来的线索：{ hosts, names } */
+const paramHints = ref(null)
+
+const hintHosts = computed(() => paramHints.value?.hosts || [])
+/** 名字可能几十个，只摆前 30 个，再多也看不过来 */
+const hintNames = computed(() => (paramHints.value?.names || []).slice(0, 30))
 
 const paramAccountText = computed(
   () =>
@@ -333,6 +341,7 @@ async function captureParams() {
   }
 
   capturing.value = true
+  paramHints.value = null
   try {
     const res = await invoke('cinemas:capture-params', {
       keys,
@@ -347,6 +356,7 @@ async function captureParams() {
 
     const values = res.values || {}
     paramValues.value = { ...paramValues.value, ...values }
+    paramHints.value = res.hints || null
     const got = Object.keys(values).length
 
     /**
@@ -651,6 +661,19 @@ onMounted(async () => {
         <div v-if="capturing" class="p-hint">
           正在抓包（这 45 秒内会临时解密本机 HTTPS）。现在切到浏览器刷新该系统的 H5 页面并完成登录，
           抓到的值会自动回填；已经抓到了就点「停止」，不用等满时间。
+        </div>
+
+        <!-- 抓不到时的排查线索：字段名对不上是常态，光说「没抓到」看不出原因 -->
+        <div v-if="!capturing && hintNames.length" class="p-debug">
+          <div class="pd-title">还有字段没对上。本次流量里出现过的名字（可能参数名不一样）：</div>
+          <div v-if="hintHosts.length" class="pd-row">
+            <span class="pd-k">域名</span>
+            <span class="pd-v">{{ hintHosts.join('、') }}</span>
+          </div>
+          <div class="pd-row">
+            <span class="pd-k">字段</span>
+            <span class="pd-v mono">{{ hintNames.join('、') }}</span>
+          </div>
         </div>
       </div>
 
@@ -1173,6 +1196,37 @@ tbody tr:hover td {
   font-size: 11px;
   line-height: 1.6;
   color: var(--tx-4);
+}
+
+/* 抓不到时的排查块：比正文更淡，不抢戏，但要看得见 */
+.p-debug {
+  margin-top: 10px;
+  padding: 7px 9px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 5px;
+  background: var(--bg-panel);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.pd-title {
+  margin-bottom: 3px;
+  color: var(--warn);
+}
+
+.pd-row {
+  display: flex;
+  gap: 6px;
+}
+
+.pd-k {
+  flex-shrink: 0;
+  color: var(--tx-4);
+}
+
+.pd-v {
+  color: var(--tx-3);
+  word-break: break-all;
 }
 
 .mini {
