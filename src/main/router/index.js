@@ -65,8 +65,7 @@ routers.push(
       api.ctx.serverCinemas = list
       return {
         ok: true,
-        tree: buildCinemaTree(list),
-        autoRenew: api.ctx.config.get('cinemas.autoRenew') || {}
+        tree: buildCinemaTree(list)
       }
     } catch (e) {
       return { ok: false, message: e.message, status: e.status || 0 }
@@ -92,18 +91,6 @@ routers.push(
     } catch (e) {
       return { ok: false, message: e.message, status: e.status || 0 }
     }
-  })
-)
-
-// 「自动续期」开关：目前只做本地持久化，续期执行逻辑待接
-routers.push(
-  new EventRoute('cinemas:auto-renew', 'invoke', async (api, data) => {
-    const { cinemaGroupId, enabled } = data.params || {}
-    if (!cinemaGroupId) return { ok: false, message: '缺少影城 ID' }
-    const map = { ...(api.ctx.config.get('cinemas.autoRenew') || {}) }
-    map[cinemaGroupId] = Boolean(enabled)
-    api.ctx.config.set('cinemas.autoRenew', map)
-    return { ok: true, autoRenew: map }
   })
 )
 

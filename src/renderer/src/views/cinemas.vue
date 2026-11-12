@@ -8,7 +8,6 @@ import LoginDialog from '../components/LoginDialog.vue'
 import CopyIcon from '../components/CopyIcon.vue'
 
 const tree = ref([])
-const autoRenew = ref({})
 const accountsMap = ref({})
 const activeSystemId = ref(0)
 const keyword = ref('')
@@ -27,7 +26,7 @@ const dialogCinema = ref(null)
 
 /** 表头 + 行的列宽：合并单元格靠 rowspan 撑开，宽度必须固定，否则会随账号数抖动
  *  标签列按「pill 实际宽度 + padding」倒推，窄了会被 text-overflow 截成「启用…」 */
-const COLS = ['28%', '10%', '18%', '8%', '8%', '10%', '15%']
+const COLS = ['33%', '10%', '22%', '8%', '8%', '16%']
 
 const activeSystem = computed(() => tree.value.find((s) => s.id === activeSystemId.value) || null)
 
@@ -159,7 +158,6 @@ async function loadTree() {
       return
     }
     tree.value = res.tree || []
-    autoRenew.value = res.autoRenew || {}
     // 新数据源把账号挂在程序上，树里已经带下来了：一次性灌进 accountsMap，
     // 避免几百个程序各走一次 IPC（也避免逐条响应触发整表重渲染）
     const seeded = {}
@@ -212,16 +210,6 @@ async function openParam(cinema) {
 function openDetail(cinema) {
   dialogCinema.value = cinema
   detailDialog.value = true
-}
-
-async function toggleAutoRenew(cinema, value) {
-  const res = await invoke('cinemas:auto-renew', { cinemaGroupId: cinema.id, enabled: value })
-  if (res?.ok) {
-    autoRenew.value = res.autoRenew
-    ElMessage.success(value ? '已开启自动续期' : '已关闭自动续期')
-  } else {
-    ElMessage.error(res?.message || '设置失败')
-  }
 }
 
 const dialogAccounts = computed(() => (dialogCinema.value ? rowsOf(dialogCinema.value) : []))
@@ -396,7 +384,9 @@ onMounted(async () => {
       <div v-else class="split">
         <!-- 左：出票系统 -->
         <aside class="systems">
-          <div class="systems-title">出票系统</div>
+          <div class="systems-title">
+            出票系统<span class="sys-total">{{ tree.length }}</span>
+          </div>
           <div class="sys-list">
             <div
               v-for="sys in tree"
@@ -430,7 +420,6 @@ onMounted(async () => {
                 <th class="center-head">出票账号</th>
                 <th class="center-head">状态</th>
                 <th class="center-head">账号</th>
-                <th class="center-head">自动续期</th>
                 <th class="center-head">操作</th>
               </tr>
             </thead>
@@ -490,14 +479,6 @@ onMounted(async () => {
                     <span v-else class="dim">—</span>
                   </td>
 
-                  <td v-if="idx === 0" :rowspan="rowsOf(cinema).length" class="renew-cell">
-                    <el-switch
-                      :model-value="Boolean(autoRenew[cinema.id])"
-                      size="small"
-                      @update:model-value="(v) => toggleAutoRenew(cinema, v)"
-                    />
-                  </td>
-
                   <td v-if="idx === 0" :rowspan="rowsOf(cinema).length" class="op-cell">
                     <button class="op-link" @click="openParam(cinema)">参数</button>
                     <button class="op-link" @click="openDetail(cinema)">详情</button>
@@ -506,7 +487,7 @@ onMounted(async () => {
               </template>
 
               <tr v-if="!filteredCinemas.length">
-                <td colspan="7" class="no-result">
+                <td colspan="6" class="no-result">
                   {{ cinemas.length ? '没有匹配的影城' : '该系统下暂无影城' }}
                 </td>
               </tr>
@@ -691,6 +672,13 @@ onMounted(async () => {
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--tx-4);
+}
+
+/* 标题后的系统数量：跟标题同级、只轻一档，别抢成标题 */
+.sys-total {
+  margin-left: 5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
 /* 系统可能有三十多个：列表自己滚，标题和底部统计固定 */
@@ -900,17 +888,13 @@ tbody tr:hover td {
   color: var(--tx-4);
 }
 
-/* ---- 状态 / 账号 / 自动续期 / 操作：标签与控件一律居中，空值也居中，不往左挤 ---- */
+/* ---- 状态 / 账号 / 操作：标签与控件一律居中，空值也居中，不往左挤 ---- */
 .st-cell,
 .valid-cell {
   text-align: center;
   /* 标签列只放一个 tag，左右各留 10px 会把列撑到刚好截断，收到 6px */
   padding-left: 6px;
   padding-right: 6px;
-}
-
-.renew-cell {
-  text-align: center;
 }
 
 .op-cell {
