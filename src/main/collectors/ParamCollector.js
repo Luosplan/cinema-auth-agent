@@ -12,7 +12,9 @@ const MAX_DEPTH = 6
 /**
  * 「手机号」这一栏的别名。
  *
- * 各家的登录接口几乎都不叫 phone：凤凰云智是 loginId，别的系统还有 loginName / account。
+ * 各家的登录接口几乎都不叫 phone：凤凰云智 H5 登录请求里叫 `principal`
+ * （`data={"type":"MOBILE","principal":"17762682464"}`），
+ * 而登录响应 / getaccountid 响应里又老老实实叫 `mobile`。
  * 这些名字本身太泛（account 完全可能是商户号），所以别名命中后还要求**值长得像手机号**
  * 才采用 —— 宁可空着让用户重抓，也不能往登录凭证里塞一个错值。
  */
@@ -27,7 +29,9 @@ const PHONE_ALIAS_KEYS = new Set([
   'mobilenumber',
   'mobilephone',
   'telphone',
-  'phonecode'
+  'phonecode',
+  // 凤凰云智：登录请求里的手机号字段
+  'principal'
 ])
 const PHONE_VALUE_RE = /^\+?\d[\d-]{5,18}$/
 

@@ -368,21 +368,25 @@ routers.push(
        */
       let lastSysCheck = Date.now()
       let reasserts = 0
-      /** 必填齐了之后再收 2 秒：同一批响应里常带着 larkSid / tid 这类非必填字段 */
+      /**
+       * 抓齐之后再收一小会儿：同一批响应里常带着别的字段。
+       * 手机号没到手时多等一会儿（6 秒）—— 凤凰云智的手机号在 login2 / getaccountid
+       * 这两个接口的响应体里（`data.bizValue.account.mobile`），它们往往比 cookie 晚一拍，
+       * 立刻收工就会白白错过，只能退回账号兜底。
+       */
       let settleUntil = 0
+      let settleMs = 2000
       while (Date.now() < deadline) {
         if (ctx.captureStop) {
           stopped = true
           break
         }
-        /**
-         * 抓齐就自动停，但**不是一抓到必填就立刻返回**：
-         * 凤凰云智的手机号和 larkSid / tid 是同一次登录请求/响应里下来的，
-         * 必填只有手机号时若是立刻收工，sid 就永远留在门外。
-         * 所以必填齐了再等 2 秒把这一批收完，然后自动退出等待循环。
-         */
         if (mustCapture.every((key) => values[key])) {
-          if (!settleUntil) settleUntil = Date.now() + 2000
+          if (!settleUntil) {
+            const needPhone = phoneFromAccount.some((key) => !values[key])
+            settleMs = needPhone ? 6000 : 2000
+            settleUntil = Date.now() + settleMs
+          }
           if (Date.now() >= settleUntil) break
         }
         await new Promise((resolve) => setTimeout(resolve, 700))
