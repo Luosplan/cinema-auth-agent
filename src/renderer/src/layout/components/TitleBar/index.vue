@@ -243,7 +243,7 @@ onUnmounted(() => {
           <div v-if="menuOpen" class="menu">
             <div class="menu-head">
               <div class="menu-name">{{ name }}</div>
-              <div class="menu-sub mono">{{ auth.member?.phone }}</div>
+              <div class="menu-sub mono">{{ auth.member?.username || auth.member?.phone }}</div>
             </div>
             <button class="menu-item" @click="openLogin">切换账号</button>
             <button class="menu-item danger" @click="doLogout">退出登录</button>

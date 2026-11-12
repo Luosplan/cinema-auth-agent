@@ -4,23 +4,50 @@ import { safeStorage } from 'electron'
 import { resolveApiBase } from '../config/endpoints.js'
 
 /**
- * 会员账号登录（凭证采集端的「我是谁」）。
+ * 后台账号登录（凭证采集端的「我是谁」）。
  *
- * 复用出票系统（ticket-server）现成的账号接口，不自建账号体系：
- *   - `POST /api/login` 收 `{ username, password }`，回 `{ success, token, id, username, role }`；
+ * 走 HK 票务后台的账号体系，不自建：
+ *   - `POST /api/login` 收 `{ username, password }`，回
+ *     `{ success, token, id, username, role, canViewLogs, canViewOrderPool, canViewReleases }`；
  *     响应是**扁平的**，不像业务接口那样包一层 data。
- *   - 服务端所有业务接口都认 `Authorization: Bearer <token>`，JWT 有效期 7 天，
+ *   - 后续接口都认 `Authorization: Bearer <token>`，JWT 有效期 7 天（exp 里写着，直接读），
  *     **没有 refresh 接口** —— 所以这里不做静默续期，改成用 `/users/me` 探活。
  *   - token 与采集到的凭证同等敏感，落盘前一律走 safeStorage（DPAPI），
  *     对渲染进程只回脱敏后的资料，明文 token 不出主进程。
  */
 const API = {
-  // 登录框仍然叫「手机号」，但服务端的 users 表是按 username 查的，
-  // 提交时把手机号当 username 传过去即可。
   signIn: '/login',
   // 没有 refresh-token 接口，用「查当前用户」来验证 token 还有没有效
   me: '/users/me'
 }
+
+/** JWT 的 exp 是唯一可靠的到期时间，别按「登录时刻 + 7 天」自己估 */
+function jwtExp(token) {
+  try {
+    const payload = String(token || '').split('.')[1]
+    if (!payload) return 0
+    const json = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+    return Number(json.exp) || 0
+  } catch {
+    return 0
+  }
+}
+
+/** 三个权限位：决定界面上能进哪几栏，缺字段一律按「没有」处理 */
+function permsOf(data) {
+  const src = data || {}
+  return {
+    logs: Boolean(src.canViewLogs),
+    orderPool: Boolean(src.canViewOrderPool),
+    releases: Boolean(src.canViewReleases)
+  }
+}
+
+export function expiresAtOf(token) {
+  const exp = jwtExp(token)
+  return exp ? new Date(exp * 1000).toISOString() : null
+}
+
 
 /**
  * 后台前端约定接口都在 `<host>/api` 下，用户可能只填域名、
@@ -56,7 +83,7 @@ export default class MemberAuth {
     this.apiBase = normalizeBaseUrl(apiBase || resolveApiBase())
     this.onLog = onLog || (() => {})
     this.encryptionAvailable = false
-    this.data = { member: null, token: null, refreshToken: null, expiresAt: null }
+    this.data = { member: null, token: null, refreshToken: null, expiresAt: null, permissions: null }
   }
 
   load() {
@@ -71,7 +98,7 @@ export default class MemberAuth {
       const raw = JSON.parse(fs.readFileSync(this.file, 'utf8'))
       this.data = { ...this.data, ...raw }
     } catch {
-      this.data = { member: null, token: null, refreshToken: null, expiresAt: null }
+      this.data = { member: null, token: null, refreshToken: null, expiresAt: null, permissions: null }
     }
     return this.data
   }
@@ -129,11 +156,14 @@ export default class MemberAuth {
       deviceId: this.deviceId,
       expiresAt: this.data.expiresAt || null,
       encrypted: this.encryptionAvailable,
+      permissions: this.data.permissions || { logs: false, orderPool: false, releases: false },
       member: member
         ? {
             id: member.id,
             name: member.name || '',
-            phone: maskPhone(member.phone),
+            username: member.username || '',
+            // 账号可能是手机号也可能不是，是手机号才脱敏，用户名照原样显示
+            phone: member.phone ? maskPhone(member.phone) : '',
             phoneMasked: member.phone ? maskPhone(member.phone) : '',
             role: member.role || '',
             loginAt: member.loginAt || null
@@ -224,12 +254,13 @@ export default class MemberAuth {
   }
 
   /**
-   * 登录。接口地址编译期固定，登录框只收手机号与密码：
-   * 出票系统按 username 查用户，这里把手机号当 username 提交，密码不落盘。
+   * 登录。接口地址编译期固定，登录框收「用户名 + 密码」：
+   * 后台按 username 查用户，手机号也能当 username 用（账号本身就是手机号时行为不变）。
+   * 密码不落盘，token 落盘前加密。
    */
-  async signIn({ phone, password }) {
-    const account = String(phone || '').trim()
-    if (!account || !password) throw new Error('请填写手机号和密码')
+  async signIn({ username, phone, password }) {
+    const account = String(username || phone || '').trim()
+    if (!account || !password) throw new Error('请填写用户名和密码')
 
     const data = await this.request(API.signIn, {
       username: account,
@@ -239,18 +270,23 @@ export default class MemberAuth {
     const token = data.token || data.accessToken || ''
     if (!token) throw new Error('登录响应里没有 token')
 
+    // 账号是手机号才留 phone（界面按 138****6666 展示），否则只认用户名
+    const asPhone = /^1\d{10}$/.test(account)
     this.data.member = {
       id: data.id,
       name: data.username || account,
-      phone: account,
+      username: data.username || account,
+      phone: asPhone ? account : '',
       role: data.role || '',
       loginAt: new Date().toISOString()
     }
+    this.data.permissions = permsOf(data)
     this.data.token = this.encrypt(token)
     // 服务端没有 refresh 接口，refreshToken 不再单独保存
     this.data.refreshToken = null
-    // JWT 固定 7 天，按登录时刻估算一个到期时间给界面展示
-    this.data.expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString()
+    // 到期时间取 JWT 里的 exp，读不到才退回「7 天后」
+    this.data.expiresAt =
+      expiresAtOf(token) || new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString()
     this.save()
 
     this.onLog('info', `账号已登录：${this.data.member.name}`)
@@ -271,10 +307,19 @@ export default class MemberAuth {
           ...this.data.member,
           id: me.id ?? this.data.member?.id,
           name: me.username,
+          username: me.username,
           role: me.role || this.data.member?.role || ''
         }
       }
-      this.data.expiresAt = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString()
+      // 权限位以后台为准：/users/me 也会回，管理员改过权限后探活就能跟上
+      if (me && ('canViewLogs' in me || 'canViewOrderPool' in me || 'canViewReleases' in me)) {
+        this.data.permissions = permsOf(me)
+      }
+      // 到期时间仍取 token 自己的 exp，探活不会延长 JWT
+      this.data.expiresAt =
+        expiresAtOf(this.getToken()) ||
+        this.data.expiresAt ||
+        new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString()
       this.save()
       return this.status()
     } catch (e) {
@@ -298,8 +343,9 @@ export default class MemberAuth {
     this.data.token = null
     this.data.refreshToken = null
     this.data.expiresAt = null
+    this.data.permissions = null
     this.save()
-    if (reason) this.onLog('warn', `会员登录已失效：${reason}`)
-    else if (name) this.onLog('info', `会员账号已退出：${name}`)
+    if (reason) this.onLog('warn', `账号登录已失效：${reason}`)
+    else if (name) this.onLog('info', `账号已退出：${name}`)
   }
 }

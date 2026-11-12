@@ -391,9 +391,9 @@ app.whenReady().then(async () => {
     version: app.getVersion()
   })
 
-  // 会员登录复用 reporter 的 agentId 当 deviceId：
+  // 账号登录复用 reporter 的 agentId 当 deviceId：
   // 服务端是单设备登录模型，这个值必须一次生成、永不变化。
-  // 接口地址固定取 config/endpoints.js（会员端同一套服务端），不做用户配置项。
+  // 接口地址固定取 config/endpoints.js（HK 票务后台），不做用户配置项。
   ctx.auth = new MemberAuth({
     dir: ctx.dataDir,
     deviceId: ctx.reporter.agentId,
@@ -436,7 +436,7 @@ app.whenReady().then(async () => {
     ctx.reporter.flush().catch(() => {})
   }, 60000)
 
-  // 会员会话保活：服务端是单设备会话，长时间不续期会被踢，
+  // 会话保活：服务端是单设备会话，长时间不续期会被踢，
   // 六小时静默续一次；断网导致的失败不清理登录态
   if (ctx.auth.isLoggedIn()) {
     ctx.auth.refresh().catch(() => {})

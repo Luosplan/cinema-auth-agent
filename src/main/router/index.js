@@ -21,12 +21,12 @@ routers.push(
   })
 )
 
-// 登录：接口地址固定取 config/endpoints.js，与会员端同一套服务端，用户无需配置
+// 登录：接口地址固定取 config/endpoints.js，用户无需配置
 routers.push(
   new EventRoute('auth:login', 'invoke', async (api, data) => {
-    const { phone, password } = data.params || {}
+    const { username, phone, password } = data.params || {}
     try {
-      return { ok: true, auth: await api.ctx.auth.signIn({ phone, password }) }
+      return { ok: true, auth: await api.ctx.auth.signIn({ username, phone, password }) }
     } catch (e) {
       return { ok: false, message: e.message }
     }

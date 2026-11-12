@@ -334,7 +334,7 @@ onMounted(async () => {
 
     <!-- 未登录 -->
     <div v-if="!auth.loggedIn" class="placeholder">
-      <div class="placeholder-text">请先登录会员账号</div>
+      <div class="placeholder-text">请先登录账号</div>
       <el-button size="small" type="primary" @click="loginOpen = true">登录</el-button>
     </div>
 
@@ -349,7 +349,7 @@ onMounted(async () => {
       </div>
 
       <div v-else-if="!tree.length" class="placeholder">
-        <div class="placeholder-text">该会员账号下没有可用的出票系统</div>
+        <div class="placeholder-text">该账号下没有可用的出票系统</div>
       </div>
 
       <div v-else class="split">

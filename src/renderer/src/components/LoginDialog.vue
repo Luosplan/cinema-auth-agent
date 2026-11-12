@@ -8,7 +8,7 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:modelValue', 'success'])
 
-const form = ref({ phone: '', password: '' })
+const form = ref({ username: '', password: '' })
 const loading = ref(false)
 const error = ref('')
 
@@ -17,7 +17,7 @@ const visible = computed({
   set: (v) => emit('update:modelValue', v)
 })
 
-const canSubmit = computed(() => Boolean(form.value.phone.trim() && form.value.password))
+const canSubmit = computed(() => Boolean(form.value.username.trim() && form.value.password))
 
 watch(
   () => props.modelValue,
@@ -25,7 +25,7 @@ watch(
     if (!open) return
     error.value = ''
     loading.value = false
-    form.value.phone = ''
+    form.value.username = ''
     form.value.password = ''
   }
 )
@@ -35,9 +35,9 @@ async function submit() {
   loading.value = true
   error.value = ''
   try {
-    // 服务地址由主进程按「设置 → 上报地址」的 origin 解析，登录框不再收集
+    // 服务地址由主进程按 config/endpoints.js 固定，登录框不收集
     await login({
-      phone: form.value.phone.trim(),
+      username: form.value.username.trim(),
       password: form.value.password
     })
     ElMessage.success('已登录')
@@ -61,17 +61,16 @@ async function submit() {
     :close-on-click-modal="!loading"
   >
     <div class="head">
-      <div class="title">登录会员账号</div>
+      <div class="title">登录 HK 票务助手</div>
     </div>
 
     <div class="fields">
       <label class="field">
-        <span class="k">手机号</span>
+        <span class="k">用户名</span>
         <el-input
-          v-model="form.phone"
+          v-model="form.username"
           size="small"
-          placeholder="会员手机号"
-          maxlength="11"
+          placeholder="后台登录账号"
           @keyup.enter="submit"
         />
       </label>

@@ -32,7 +32,7 @@ const NAV = [
     group: '设置',
     items: [
       { key: 'general', label: '通用', icon: 'sliders', keywords: '端口 自启 托盘 启动 采集' },
-      { key: 'account', label: '账号', icon: 'user', keywords: '会员 登录 退出 手机号' }
+      { key: 'account', label: '账号', icon: 'user', keywords: '登录 退出 用户名 账号' }
     ]
   },
   {
@@ -71,6 +71,14 @@ const filteredNav = computed(() => {
     ...g,
     items: g.items.filter((it) => `${it.label} ${it.keywords || ''}`.toLowerCase().includes(kw))
   })).filter((g) => g.items.length)
+})
+
+/** 后台只下发 user / admin 两种角色，展示成中文 */
+const roleText = computed(() => {
+  const r = String(auth.member?.role || '').toLowerCase()
+  if (r === 'admin') return '管理员'
+  if (r === 'user') return '普通用户'
+  return r || '账号'
 })
 
 // ---- 配置项 ----
@@ -453,30 +461,45 @@ onUnmounted(() => {
 
         <!-- ========== 账号 ========== -->
         <template v-else-if="active === 'account'">
-          <div class="grp">会员账号</div>
+          <div class="grp">登录账号</div>
           <div class="card">
             <template v-if="auth.loggedIn">
               <div class="row">
                 <div class="row-main">
-                  <div class="row-title">{{ auth.member.name || '（未设置昵称）' }}</div>
-                  <div class="row-desc">凭证归属该会员账号，一台设备同时只登录一个</div>
+                  <div class="row-title">
+                    {{ auth.member.name || '（未设置用户名）' }}
+                    <span class="pill">{{ roleText }}</span>
+                  </div>
+                  <div class="row-desc">凭证归属该登录账号，一台设备同时只登录一个</div>
                 </div>
-                <span class="val mono">{{ auth.member.phone }}</span>
+                <span class="val mono">{{ auth.member.username || auth.member.phone }}</span>
               </div>
 
               <div class="row">
                 <div class="row-main">
                   <div class="row-title">接口地址</div>
-                  <div class="row-desc">内置地址，与会员端同一套服务，无需配置</div>
+                  <div class="row-desc">内置地址，由客户端固定，无需配置</div>
                 </div>
                 <span class="val mono ellipsis" :title="auth.baseUrl">{{ auth.baseUrl }}</span>
+              </div>
+
+              <div class="row">
+                <div class="row-main">
+                  <div class="row-title">数据权限</div>
+                  <div class="row-desc">由后台按账号下发，改了权限重开一次设置即可看到</div>
+                </div>
+                <div class="row-ctl">
+                  <span class="pill" :class="auth.permissions.logs ? 'ok' : ''">日志</span>
+                  <span class="pill" :class="auth.permissions.orderPool ? 'ok' : ''">订单池</span>
+                  <span class="pill" :class="auth.permissions.releases ? 'ok' : ''">放行</span>
+                </div>
               </div>
             </template>
 
             <div v-else class="row">
               <div class="row-main">
                 <div class="row-title">未登录</div>
-                <div class="row-desc">用会员手机号登录，采集结果才会归属到你的账号</div>
+                <div class="row-desc">用后台账号登录，采集结果才会归属到你的账号</div>
               </div>
               <el-button size="small" type="primary" @click="loginOpen = true">登录</el-button>
             </div>
