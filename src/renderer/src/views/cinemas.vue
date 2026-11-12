@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { invoke } from '@utils/ipc'
 import { auth, loadAuth } from '../stores/auth'
+import { setCinemaStats } from '../stores/stats'
 import LoginDialog from '../components/LoginDialog.vue'
 import CopyIcon from '../components/CopyIcon.vue'
 
@@ -280,6 +281,16 @@ async function copyParam(row) {
 watch(activeSystemId, () => {
   if (cinemas.value.length) loadAccounts(cinemas.value)
 })
+
+/**
+ * 底部状态栏要显示当前系统的规模。数据本来就只在这里加载，
+ * 算完顺手写进 store，别让状态栏自己再拉一遍 tree + 账号。
+ */
+watch(
+  [cinemas, totalAccounts],
+  ([list, accounts]) => setCinemaStats(list.length, accounts),
+  { immediate: true }
+)
 
 /** 拉树 + 当前系统的账号（登录成功、刷新都走这里） */
 async function reload() {

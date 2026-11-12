@@ -1,49 +1,33 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
-import { invoke } from '@utils/ipc'
-import Sidebar from './components/Sidebar/index.vue'
-
-const running = ref(false)
-const port = ref(0)
-
-let timer = null
+import { onMounted, onUnmounted } from 'vue'
+import TitleBar from './components/TitleBar/index.vue'
+import StatusBar from './components/StatusBar/index.vue'
+import { startProxyPoll, stopProxyPoll } from '../stores/proxy'
 
 /**
- * 采集状态侧栏要用。主进程没有状态变更推送，
- * 这里用轻量轮询兜住，3 秒一次开销可忽略。
+ * 外壳：自绘标题栏（窗口是 frame:false）+ 内容 + 底部状态栏。
+ *
+ * 采集状态在这里统一轮询：标题栏的播放/暂停和状态栏的指示灯都读同一个单例，
+ * 各自轮询会打双份 IPC。
  */
-async function poll() {
-  try {
-    const s = await invoke('proxy:status')
-    running.value = Boolean(s?.running)
-    port.value = s?.port || 0
-  } catch {
-    /* 轮询失败保持上一次状态，不打扰用户 */
-  }
-}
-
-onMounted(() => {
-  poll()
-  timer = setInterval(poll, 3000)
-})
-
-onUnmounted(() => {
-  if (timer) clearInterval(timer)
-})
+onMounted(() => startProxyPoll())
+onUnmounted(() => stopProxyPoll())
 </script>
 
 <template>
   <div class="shell">
-    <Sidebar :running="running" :port="port" />
+    <TitleBar />
     <main class="content">
       <router-view />
     </main>
+    <StatusBar />
   </div>
 </template>
 
 <style lang="scss" scoped>
 .shell {
   display: flex;
+  flex-direction: column;
   height: 100%;
   overflow: hidden;
   background: var(--bg);
@@ -51,8 +35,7 @@ onUnmounted(() => {
 
 .content {
   flex: 1;
-  min-width: 0;
-  height: 100%;
+  min-height: 0;
   overflow: hidden;
 }
 </style>

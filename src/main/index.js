@@ -66,6 +66,12 @@ function createWindow() {
     show: false,
     autoHideMenuBar: true,
     title: APP_TITLE,
+    /**
+     * 无边框：标题栏由渲染层自己画（TitleBar/index.vue）。
+     * 保留 thickFrame（默认 true），Windows 才有边缘拖拽缩放和阴影；
+     * 拖动区域靠 CSS 的 -webkit-app-region 声明，双击最大化由系统处理。
+     */
+    frame: false,
     ...(process.platform === 'linux' ? { icon } : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -81,6 +87,16 @@ function createWindow() {
     mainWindow.setTitle(APP_TITLE)
     mainWindow.show()
   })
+
+  /**
+   * 无边框后系统不再画 ─ □ ✕，最大化状态只能由渲染层自己维护；
+   * 系统菜单/双击标题栏/快捷键也能改变它，所以以事件为准往界面推。
+   */
+  const pushWindowState = () => {
+    broadcast('window-state', { maximized: mainWindow.isMaximized() })
+  }
+  mainWindow.on('maximize', pushWindowState)
+  mainWindow.on('unmaximize', pushWindowState)
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
@@ -109,6 +125,8 @@ function createWindow() {
   eventRouter.addApi('dialog', dialog)
   eventRouter.addApi('fs', fs)
   eventRouter.addApi('log', log)
+  // 窗口控制路由要拿当前窗口，用取值函数而不是传对象，避免持有过期引用
+  eventRouter.addApi('getWin', () => mainWindow)
   eventRouter.addRoutes(routers)
 
   ipcMain.removeAllListeners('renderer-to-main')

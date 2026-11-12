@@ -426,4 +426,43 @@ async function checkCaInstalled(fingerprint) {
   }
 }
 
+/**
+ * 窗口控制。
+ *
+ * `frame: false` 之后系统不再画 ─ □ ✕，只能由渲染层自绘标题栏调用这几个路由。
+ * 最大化状态额外通过 `window-state` 广播推给渲染层，让「还原」图标能跟着变。
+ */
+routers.push(
+  new EventRoute('window:minimize', 'invoke', async (api) => {
+    const win = api.getWin()
+    if (win) win.minimize()
+    return { ok: Boolean(win) }
+  })
+)
+
+routers.push(
+  new EventRoute('window:toggle-max', 'invoke', async (api) => {
+    const win = api.getWin()
+    if (!win) return { ok: false, maximized: false }
+    if (win.isMaximized()) win.unmaximize()
+    else win.maximize()
+    return { ok: true, maximized: win.isMaximized() }
+  })
+)
+
+routers.push(
+  new EventRoute('window:close', 'invoke', async (api) => {
+    const win = api.getWin()
+    if (win) win.close()
+    return { ok: Boolean(win) }
+  })
+)
+
+routers.push(
+  new EventRoute('window:state', 'invoke', async (api) => {
+    const win = api.getWin()
+    return { maximized: Boolean(win && win.isMaximized()) }
+  })
+)
+
 export default routers
