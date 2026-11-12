@@ -186,13 +186,7 @@ routers.push(
       ? [...new Set(params.keys.filter(Boolean).map(String))]
       : []
     const systemCode = String(params.systemCode || '')
-    if (!keys.length) return { ok: false, message: '该影城没有配置抓包参数' }
-
-    const rule = ctx.extractor.activeRules.find((r) => r.id === systemCode)
-    if (!rule) {
-      // 抓包规则已整体移除，解密域名待后续单独接入 —— 在此之前这个按钮必然拿不到值
-      return { ok: false, message: '抓包域名尚未配置，暂时无法自动获取参数' }
-    }
+    if (!keys.length) return { ok: false, message: '该程序没有配置抓包参数' }
 
     if (!ctx.proxyRunning) {
       try {
@@ -202,34 +196,50 @@ routers.push(
       }
     }
 
-    const values = {}
-    // 只回扫最近 200 条：更早的基本是别的系统，翻全量没意义还慢
-    let scanned = Math.max(0, ctx.captures.length - 200)
-    const scanNew = () => {
-      const list = ctx.captures
-      if (list.length < scanned) scanned = 0 // 缓冲被截断过，从头再扫
-      for (let i = scanned; i < list.length; i += 1) {
-        const record = list[i]
-        if (ctx.extractor.hostMatches(rule, record.host)) {
-          Object.assign(values, pickValues(record, keys))
+    /**
+     * 解密范围：`设置 → 抓包规则` 里给这套系统配过域名就只解密那几个域名；
+     * 没配过（默认就是没配）就在这次抓包期间**临时放行全部 HTTPS**，抓完立刻恢复。
+     * 不放行的话流量全是隧道直通，这里永远拿不到请求头 / 响应体。
+     */
+    const rule = ctx.extractor.activeRules.find((r) => r.id === systemCode)
+    const hasHosts = Boolean(rule && (rule.hosts || []).length)
+    const loose = !hasHosts
+    if (loose) ctx.interceptAll = true
+
+    try {
+      const values = {}
+      const accept = (record) =>
+        hasHosts ? ctx.extractor.hostMatches(rule, record.host) : Boolean(record.host)
+      // 只回扫最近 200 条：更早的基本是别的系统，翻全量没意义还慢
+      let scanned = Math.max(0, ctx.captures.length - 200)
+      const scanNew = () => {
+        const list = ctx.captures
+        if (list.length < scanned) scanned = 0 // 缓冲被截断过，从头再扫
+        for (let i = scanned; i < list.length; i += 1) {
+          const record = list[i]
+          if (accept(record)) Object.assign(values, pickValues(record, keys))
         }
+        scanned = list.length
       }
-      scanned = list.length
-    }
 
-    scanNew()
-    const waitMs = Math.min(Math.max(Number(params.waitMs) || 20000, 3000), 60000)
-    const deadline = Date.now() + waitMs
-    while (keys.some((key) => !values[key]) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 700))
       scanNew()
-    }
+      const waitMs = Math.min(Math.max(Number(params.waitMs) || 20000, 3000), 60000)
+      const deadline = Date.now() + waitMs
+      while (keys.some((key) => !values[key]) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 700))
+        scanNew()
+      }
 
-    return {
-      ok: true,
-      values,
-      missing: keys.filter((key) => !values[key]),
-      proxyRunning: ctx.proxyRunning
+      return {
+        ok: true,
+        values,
+        missing: keys.filter((key) => !values[key]),
+        proxyRunning: ctx.proxyRunning,
+        // 本次是否用了「全量解密」窗口，界面提示里要说明
+        loose
+      }
+    } finally {
+      if (loose) ctx.interceptAll = false
     }
   })
 )

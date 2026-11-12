@@ -164,8 +164,10 @@ export function captureConfigOf(credentials) {
  * 列表接口的 compact=1 只回值不回声明，靠 `credentials` 的键名反推会得到
  * phone / mobile / phoneNumber 一堆同义字段，真正要抓的 appletToken 反而看不出必填。
  *
- * 返回值：{ account, fields: [{ key, label, required, type, help, value }] }
- * `value` 取服务端已存的凭证（运营点开就能看到现在用的是哪个 token）。
+ * **只回字段名，不回值**：参数值是要现场抓包抓出来的，接口里的旧值不预填
+ * （预填了运营就不会去抓，等于拿着过期 token 以为是新的）。当前登录信息另放 `info`。
+ *
+ * 返回值：{ account, info, fields: [{ key, label, required, type, help }] }
  */
 export function paramSchemaOf(row) {
   const schema = row?.config_schema || row?.configSchema || {}
@@ -173,7 +175,6 @@ export function paramSchemaOf(row) {
     row?.user_credentials && Object.keys(row.user_credentials).length
       ? row.user_credentials
       : row?.credentials || {}
-  const account = String(row?.account_name || '')
 
   const declared = Array.isArray(schema.fields) ? schema.fields : []
   const fields = declared
@@ -185,25 +186,32 @@ export function paramSchemaOf(row) {
         label: String(item.label || key),
         required: typeof item.required === 'boolean' ? item.required : null,
         type: String(item.type || ''),
-        help: String(item.help || ''),
-        value: credentials[key] === null || credentials[key] === undefined ? '' : String(credentials[key])
+        help: String(item.help || '')
       }
     })
 
   // 程序没声明 config_schema（老数据）才退回凭证键，否则会混进一堆同义手机号字段
-  if (fields.length) return { account, fields }
-  for (const [key, value] of Object.entries(credentials)) {
-    if (value === null || value === undefined || value === '') continue
-    fields.push({
-      key,
-      label: CREDENTIAL_LABELS[key] || key,
-      required: null,
-      type: '',
-      help: '',
-      value: String(value)
-    })
+  if (!fields.length) {
+    for (const [key, value] of Object.entries(credentials)) {
+      if (value === null || value === undefined || value === '') continue
+      fields.push({ key, label: CREDENTIAL_LABELS[key] || key, required: null, type: '', help: '' })
+    }
   }
-  return { account, fields }
+
+  const cinemaNames = Array.isArray(row?.cinema_id_names)
+    ? row.cinema_id_names.map((c) => c.name).filter(Boolean)
+    : []
+  const info = {
+    account: String(row?.account_name || ''),
+    system: String(row?.runtime_system || row?.program_key || row?.system || ''),
+    type: String(row?.type || ''),
+    cinemaCount: Number(row?.cinema_count) || cinemaNames.length || 1,
+    cinemaNames,
+    enabled: Number(row?.enabled) === 1,
+    credentialStatus: String(row?.credential_status || ''),
+    checkedAt: row?.credential_checked_at || ''
+  }
+  return { account: info.account, info, fields }
 }
 
 /**

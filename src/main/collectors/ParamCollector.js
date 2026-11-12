@@ -11,16 +11,22 @@ const MAX_DEPTH = 6
 
 /** 一条记录里能对上多少个字段，就返回多少个 */
 export function pickValues(record, keys) {
-  const wanted = new Set((keys || []).filter(Boolean).map(String))
+  /**
+   * 字段名对齐不看大小写和分隔符：后台 schema 写的是 appletToken，
+   * 请求头里是 `applet-token`，JSON 里可能是 `applet_token`，三种写法得算同一个字段。
+   */
+  const wanted = new Map()
+  ;(keys || []).filter(Boolean).forEach((key) => wanted.set(normKey(key), String(key)))
   const out = {}
   if (!record || !wanted.size) return out
 
   const put = (key, value) => {
-    if (!wanted.has(key) || value === undefined || value === null) return
+    const origin = wanted.get(normKey(key))
+    if (!origin || value === undefined || value === null) return
     const text = typeof value === 'object' ? safeStringify(value) : String(value).trim()
     if (!text) return
     // 记录按时间从旧到新遍历，后写的覆盖先写的，留下的就是最近一次看到的值
-    out[key] = text
+    out[origin] = text
   }
 
   // 1. URL 查询串
@@ -57,6 +63,13 @@ export function pickValues(record, keys) {
   walkJson(parseJsonSafe(record.resBody), put, 0)
 
   return out
+}
+
+/** 字段名归一：appletToken / applet-token / APPET_TOKEN 都折成 applettoken */
+function normKey(key) {
+  return String(key || '')
+    .toLowerCase()
+    .replace(/[\s_-]/g, '')
 }
 
 function eachHeader(headers, put) {

@@ -383,6 +383,8 @@ app.whenReady().then(async () => {
 
   // 抓包规则已整体移除，Extractor 先以空规则集启动，等域名配置接入后再填充
   ctx.extractor = new Extractor([])
+  // 临时放行全部 HTTPS 的开关：只在「获取参数」那段抓包窗口里为 true
+  ctx.interceptAll = false
 
   ctx.systemProxy = new SystemProxy()
   ctx.reporter = new Reporter({
@@ -405,7 +407,12 @@ app.whenReady().then(async () => {
 
   ctx.proxy = new MitmProxy({
     ca: ctx.ca,
-    matchHost: (host) => ctx.extractor.matchHost(host)
+    /**
+     * 默认只解密「设置 → 抓包规则」里配过的域名，其余直通（不影响客户机别的网站）。
+     * `ctx.interceptAll` 是抓包按钮的临时放行开关：没配域名时靠它才能在窗口期内拿到请求头，
+     * 抓完立刻复位，不做常驻全量解密。
+     */
+    matchHost: (host) => Boolean(ctx.interceptAll) || ctx.extractor.matchHost(host)
   })
   ctx.proxy.onCapture = handleCapture
   ctx.proxy.onLog = log
