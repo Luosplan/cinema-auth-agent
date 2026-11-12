@@ -215,13 +215,6 @@ export default class MitmProxy {
     const reqChunks = []
     let reqSize = 0
 
-    clientReq.on('data', (chunk) => {
-      if (reqSize < MAX_CAPTURE_BYTES) {
-        reqChunks.push(chunk)
-        reqSize += chunk.length
-      }
-    })
-
     const headers = { ...clientReq.headers }
     delete headers['proxy-connection']
     delete headers['proxy-authorization']
@@ -279,6 +272,27 @@ export default class MitmProxy {
       upstreamRes.on('error', () => clientRes.destroy())
     })
 
+    /**
+     * 请求体必须跟着客户端流的节奏转发。
+     *
+     * 原来的写法是「先把压下来的 chunk 写一次，然后立刻 end()」——
+     * 只要 body 没在 header 同一个包里到达（chunked、大表单、浏览器分片发送），
+     * 上游收到的就是「声明了 content-length 却一个字节都没有」的请求：
+     * 轻则 socket hang up，重则源站死等 30 秒超时。登录接口全是 POST，正好踩满。
+     * 所以改成：data 就转发（顺手留一份给抓包），end 才收尾。
+     */
+    clientReq.on('data', (chunk) => {
+      upstreamReq.write(chunk)
+      if (reqSize < MAX_CAPTURE_BYTES) {
+        reqChunks.push(chunk)
+        reqSize += chunk.length
+      }
+    })
+    clientReq.on('end', () => upstreamReq.end())
+    // 客户端中途断开（用户关页面/取消请求）就别让上游请求悬着
+    clientReq.on('error', () => upstreamReq.destroy())
+    clientReq.on('aborted', () => upstreamReq.destroy())
+
     upstreamReq.setTimeout(UPSTREAM_TIMEOUT, () => {
       upstreamReq.destroy(new Error('上游超时'))
     })
@@ -291,9 +305,6 @@ export default class MitmProxy {
       }
       clientRes.end('upstream error')
     })
-
-    if (reqChunks.length) upstreamReq.write(Buffer.concat(reqChunks))
-    upstreamReq.end()
   }
 
   emitCapture(record) {
