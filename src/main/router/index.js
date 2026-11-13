@@ -2,10 +2,20 @@ import EventRoute from './EventRoute'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { join } from 'node:path'
+import net from 'node:net'
 import fs from 'node:fs'
-import { pickValues, describeTraffic, isPhoneKey } from '../collectors/ParamCollector.js'
-import { seedHosts, inFamily, isNoiseHost, registrableOf } from '../collectors/SystemDomains.js'
-import { checkCaInstalled, probeCaInstalled } from '../mitm/CaTrust.js'
+import { pickValues, describeTraffic, isPhoneKey, fieldsNeverSeen } from '../collectors/ParamCollector.js'
+import { decideEarlyExit } from '../collectors/IdleGuard.js'
+import {
+  seedHosts,
+  inFamily,
+  isNoiseHost,
+  registrableOf,
+  pathHintsOf,
+  pathMatchesSystem,
+  isLooseSystem
+} from '../collectors/SystemDomains.js'
+import { checkCaInstalled, probeCaInstalled, invalidateCaCache } from '../mitm/CaTrust.js'
 import { parseProxyServer } from '../mitm/SystemProxy.js'
 import {
   buildCinemaTree,
@@ -22,6 +32,36 @@ const routers = []
 
 function ps(script) {
   return exec('powershell', [...PS, script], { windowsHide: true, timeout: 30000 })
+}
+
+/**
+ * 探一下代理端口是不是真在监听。
+ *
+ * `ctx.proxyRunning` 只是个内存标志 —— 代理进程内部出错、端口被别的程序占了，
+ * 标志照样是 true，面板就会一直显示「抓包中」而连接数永远是 0。
+ * 真连一次 localhost 才能确定「浏览器能不能连上来」。
+ *
+ * 面板 800ms 轮询一次，端口不通时每次都要白等满超时，所以结果缓存 1.5 秒：
+ * 探测精度对这个场景足够，又不至于让主进程一直被 pending 的连接占着。
+ */
+const portProbeCache = new Map()
+function probePort(port, timeout = 350) {
+  if (!port) return Promise.resolve(false)
+  const cached = portProbeCache.get(port)
+  if (cached && Date.now() - cached.at < 1500) return Promise.resolve(cached.ok)
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port })
+    const done = (ok) => {
+      socket.removeAllListeners()
+      socket.destroy()
+      portProbeCache.set(port, { ok, at: Date.now() })
+      resolve(ok)
+    }
+    socket.setTimeout(timeout)
+    socket.once('connect', () => done(true))
+    socket.once('timeout', () => done(false))
+    socket.once('error', () => done(false))
+  })
 }
 
 routers.push(
@@ -191,7 +231,35 @@ routers.push(
       ? [...new Set(params.keys.filter(Boolean).map(String))]
       : []
     const systemCode = String(params.systemCode || '')
-    if (!keys.length) return { ok: false, message: '该程序没有配置抓包参数' }
+    /**
+     * 参数可能是空的 —— 没有可抓字段就直接告诉界面「没有」，不要起代理干等。
+     *
+     * 后台有些程序的配置项全是人工填写项（备注 / 会员成本 / 折扣），
+     * 这些永远不会出现在流量里，开了抓包窗口也只能等到超时，
+     * 用户体感就是「一直在获取，最后什么都没有」。
+     */
+    if (!keys.length) {
+      return {
+        ok: true,
+        values: {},
+        missing: [],
+        empty: true,
+        complete: false,
+        stopped: false,
+        reason: '该程序没有配置抓包参数，不需要抓'
+      }
+    }
+    if (!keys.some((key) => !isManualField(key))) {
+      return {
+        ok: true,
+        values: {},
+        missing: [],
+        empty: true,
+        complete: false,
+        stopped: false,
+        reason: '该程序的参数都是人工填写项（备注 / 成本 / 折扣），流量里抓不到，直接手填'
+      }
+    }
 
     /**
      * 「抓到什么程度算完」的判据只认必填字段。
@@ -203,27 +271,28 @@ routers.push(
     const requiredKeys = Array.isArray(params.requiredKeys)
       ? params.requiredKeys.map(String).filter((key) => keys.includes(key))
       : []
-    const required = requiredKeys.length ? requiredKeys : keys
+    /**
+     * 必填标记缺失（老数据没写 required）时才退回全部字段，
+     * 但要把「人工填」的那几列排掉 —— 备注 / 会员折扣这类永远不会出现在流量里，
+     * 拿它们当「抓齐」条件就等于永远等不满 45 秒。
+     */
+    const required = requiredKeys.length ? requiredKeys : keys.filter((key) => !isManualField(key))
 
     /**
-     * 手机号的兜底：出票账号本身就是登录/会员手机号。
+     * 手机号单独一档：它和别的字段不是一个来源。
      *
-     * 手机号在流量里**只出现在登录那一次请求**的 data 里（凤凰云智叫 loginId）；
-     * 已登录态下再刷新页面，浏览器只拿现成 sid 去拉数据，手机号一次都不会再发 ——
-     * 这也是「sid/tid 都抓到了、就手机号一直空」的原因。
-     * 后台这一栏配的是 `mobile`，恰好等于账号本身，那就不该逼用户退出登录重来。
+     * 凤凰云智的 mobile 只在 **响应体**里（getaccountid / getsidbytid 的
+     * `data.bizValue.account.mobile`），而 tid / larkSid / _m_h5_tk 在请求体与 cookie 里。
+     * 所以响应体一旦解不开（比如服务端回了我们解不了的压缩），就会出现
+     * 「四个字段都有、就手机号永远空」——这也是之前一直以为是「只在登录请求里出现」的原因。
      *
-     * 只认标准 11 位手机号：账号是商户号 / 渠道码这类值时不会误填。
-     * 也不参与「什么时候算抓齐」的判定 —— 否则一开始就被补齐，等不到 sid / tid。
+     * 现在的策略：其它必填齐了之后，再给手机号 2.5 秒（响应体通常比 cookie 晚一拍），
+     * 超时就用已抓到的收工 —— 既不会为它干等 45 秒，也不会因为提前收尾漏掉它。
+     *
+     * 另外**不再拿出票账号兜底**：那个账号来自后台接口，跟浏览器里登录的往往不是同一个号。
      */
-    const account = String(params.account || '').trim()
-    const phoneFromAccount = []
-    if (/^(\+?86)?1[3-9]\d{9}$/.test(account)) {
-      for (const key of required) {
-        if (isPhoneKey(key)) phoneFromAccount.push(key)
-      }
-    }
-    const mustCapture = required.filter((key) => !phoneFromAccount.includes(key))
+    const phoneKeys = new Set(required.filter(isPhoneKey))
+    const restKeys = required.filter((key) => !phoneKeys.has(key))
 
     /**
      * 手动停止标志：一开始就同步清零。
@@ -234,19 +303,29 @@ routers.push(
      * 放在同步段里，后到的 stop 消息一定能被循环看到。
      */
     ctx.captureStop = false
+    // 上一轮的被筛记录 / 计数不能混进这一轮的面板
+    if (Array.isArray(ctx.skippedCaptures)) ctx.skippedCaptures.length = 0
+    if (ctx.proxy?.stats) ctx.proxy.stats.skipped = 0
 
     /**
      * 证书是硬前提：没装根证书时浏览器根本不会跟代理握手成功，
      * 干等满一轮也只会拿到 0 个值 —— 先在这里拦掉并说清楚要做什么。
+     *
+     * 但只在**这一轮真要启代理**时查：代理已经在跑，说明启动那会儿已经过了闸，
+     * 中途被删证书由 ca:info 那一路负责停掉采集。
+     * 每点一次「获取参数」都起一个 PowerShell 查证书存储，光这一步就白等半秒到两秒。
      */
-    const caOk = await checkCaInstalled(ctx.ca.getFingerprint())
-    if (!caOk) {
-      return {
-        ok: false,
-        needCa: true,
-        message:
-          '根证书还没安装，HTTPS 解不开，抓不到任何请求。' +
-          '请先点底部「证书 未安装」完成安装，再回来点「获取参数」'
+    let startedHere = false
+    if (!ctx.proxyRunning) {
+      const caOk = await checkCaInstalled(ctx.ca.getFingerprint())
+      if (!caOk) {
+        return {
+          ok: false,
+          needCa: true,
+          message:
+            '根证书还没安装，HTTPS 解不开，抓不到任何请求。' +
+            '请先点底部「证书 未安装」完成安装，再回来点「获取参数」'
+        }
       }
     }
 
@@ -261,6 +340,7 @@ routers.push(
         if (!ctx.proxyRunning) {
           return { ok: false, message: started?.error || '抓包代理没能启动，请重试' }
         }
+        startedHere = true
       } catch (e) {
         return { ok: false, message: `抓包代理启动失败：${e.message}` }
       }
@@ -275,24 +355,36 @@ routers.push(
      * 这里先抢一次回来，抢不回来就立刻失败并说清楚，别让人白等 45 秒。
      */
     const port = ctx.proxy.port
-    let sys = await ctx.systemProxy.verify(port).catch(() => ({ ok: true }))
-    // 回读失败（PowerShell 抖动）不能当成「被抢走」，否则会误报把人劝退
-    if (sys.error) sys = { ok: true }
-    if (!sys.ok) {
-      await ctx.systemProxy.reapply(port).catch(() => {})
-      sys = await ctx.systemProxy.verify(port)
+    /** 留给循环第一拍消费的系统代理回读（代理本来就在跑时用，见下面的 else 分支） */
+    let pendingSysCheck = null
+    if (startedHere) {
+      /** 刚接管过系统代理，必须当场确认：抢不回来就立刻失败，别让人白等 45 秒 */
+      let sys = await ctx.systemProxy.verify(port).catch(() => ({ ok: true }))
+      // 回读失败（PowerShell 抖动）不能当成「被抢走」，否则会误报把人劝退
+      if (sys.error) sys = { ok: true }
       if (!sys.ok) {
-        const actual = sys.actual || '（未设置）'
-        return {
-          ok: false,
-          hijacked: true,
-          message:
-            `系统代理当前指向 ${actual}，不是采集助手（127.0.0.1:${port}），` +
-            '浏览器流量没经过这里，所以抓不到任何内容。' +
-            '本程序已经把原来的代理挂成上游（出网不受影响），但系统代理被它改了回去；' +
-            '请在那类软件里关掉「系统代理」开关（软件本身可以继续开着），再点「获取参数」'
+        await ctx.systemProxy.reapply(port).catch(() => {})
+        sys = await ctx.systemProxy.verify(port)
+        if (!sys.ok) {
+          const actual = sys.actual || '（未设置）'
+          return {
+            ok: false,
+            hijacked: true,
+            message:
+              `系统代理当前指向 ${actual}，不是采集助手（127.0.0.1:${port}），` +
+              '浏览器流量没经过这里，所以抓不到任何内容。' +
+              '本程序已经把原来的代理挂成上游（出网不受影响），但系统代理被它改了回去；' +
+              '请在那类软件里关掉「系统代理」开关（软件本身可以继续开着），再点「获取参数」'
+          }
         }
       }
+    } else {
+      /**
+       * 代理本来就跑着（常规路径）：这一拍不阻塞。
+       * 回读一次注册表要起一个 PowerShell（几百毫秒起），挪到等待循环第一拍去消费，
+       * 用户少等的这几百毫秒，就是「刷一下页面就出参数」和「点了按钮没反应」的差别。
+       */
+      pendingSysCheck = ctx.systemProxy.verify(port).catch(() => ({ ok: true, error: 'skip' }))
     }
 
     /**
@@ -310,8 +402,36 @@ routers.push(
     const ruleHosts = (rule?.hosts || []).map((h) => String(h).replace(/^\*\./, ''))
     const focus = new Set(ruleHosts.length ? ruleHosts : seedHosts(systemCode))
     ctx.focusHosts = focus
-    let loose = focus.size === 0
-    if (loose) ctx.interceptAll = true
+    /**
+     * 记下这次用的是哪个系统代号：面板要显示出来。
+     * 代号一旦和 SEEDS 里的 key 对不上，解密范围就是空的（表现为「N 条连接 0 解密」），
+     * 而用户从界面上看不出代号错在哪 —— 把原始代号亮出来，一眼就能发现是不是它的问题。
+     */
+    ctx.captureSystemCode = systemCode
+    /**
+     * 需要放开全量解密的两种情况，理由不一样：
+     *   1) `focus.size === 0`：这套系统压根没登记域名族，只能先全量，抓到再收窄；
+     *   2) `isLooseSystem`：域名族登记了也认不全（mini 每家影院一个独立域名），
+     *      只锁已知族会漏掉别家影城 —— 只能全量解密，靠路径特征（/MiniTicket/）认人。
+     * 第 2 种情况 `focus` 是非空的，所以不能再用 `focus.size === 0` 当 loose 的判定。
+     */
+    const looseByPath = isLooseSystem(systemCode)
+    let loose = focus.size === 0 || looseByPath
+    if (loose) {
+      ctx.interceptAll = true
+      /**
+       * 全量解密要在日志里说清楚，用户看到「怎么变慢了」时能对上原因，
+       * 也知道抓到第一个参数后会自动收窄到那一族。
+       */
+      api.log(
+        'warn',
+        looseByPath
+          ? `${systemCode} 的域名不固定（各影院独立域名），本次放开全量解密，` +
+              `路径命中 ${pathHintsOf(systemCode).join('、')} 就收窄`
+          : `未登记 ${systemCode || '该系统'} 的解密域名，本次临时全量解密（已过滤图片等静态资源），` +
+              '抓到第一个参数后自动收窄'
+      )
+    }
 
     /** 锁定（或收窄）解密范围。锁定后 matchHost 只对族内域名返回 true */
     const lockFocus = (host) => {
@@ -322,14 +442,30 @@ routers.push(
     }
 
     try {
+      /**
+       * 窗口内把原始记录的节流压到 60ms，并先把积压的那批冲进缓冲。
+       * 否则用户刷完页面，值其实已经到了 pending 里，却要再等一拍 400ms 才被回扫看到。
+       */
+      ctx.captureFastFlush = true
+      if (typeof ctx.flushCaptures === 'function') ctx.flushCaptures()
+
       const values = {}
       const accept = (record) => {
         if (isNoiseHost(record.host)) return false
-        if (focus.size) return inFamily(record.host, focus)
-        return Boolean(record.host)
+        if (!focus.size) return Boolean(record.host)
+        if (inFamily(record.host, focus)) return true
+        /**
+         * 域名不在族里，但路径带这套系统的特征（mini 的 /MiniTicket/index.php）：
+         * 换了一家影城、域名没登记过，照样认它是目标请求。
+         */
+        return pathMatchesSystem(systemCode, record.path)
       }
       // 只回扫最近 200 条：更早的基本是别的系统，翻全量没意义还慢
       let scanned = Math.max(0, ctx.captures.length - 200)
+      /** 窗口开始时的缓冲长度：之后的记录才算「这次刷新带来的新流量」 */
+      const baseline = ctx.captures.length
+      /** 这次窗口内有没有真的抓到过新值（只有旧记录凑齐时不能马上交差） */
+      let freshHit = false
       /** 留一份命中的记录用于事后诊断（字段名对不上时靠它说清楚） */
       const accepted = []
       const scanNew = () => {
@@ -343,11 +479,15 @@ routers.push(
           const got = pickValues(record, keys)
           if (!Object.keys(got).length) continue
           Object.assign(values, got)
+          if (i >= baseline) freshHit = true
           /**
-           * 兜底模式（这套系统没登记域名族）下抓到第一个目标字段时收窄：
-           * 给东西的这一族就是对的，其余域名立刻停止解密。
+           * 全量解密模式下抓到第一个目标字段就收窄：给东西的这一族就是对的，
+           * 其余域名立刻停止解密。
+           *
+           * 判据用 `loose` 而不是 `!focus.size`：mini 既有已知族（xcxyyww.cn）又要全量，
+           * 换了一家影城时命中的域名并不在族里，靠 `lockFocus` 把实际域名并进来。
            */
-          if (!focus.size) {
+          if (loose) {
             lockFocus(record.host)
             loose = false
             ctx.interceptAll = false
@@ -362,6 +502,15 @@ routers.push(
       const deadline = startedAt + waitMs
       let stopped = false
       /**
+       * 「这次确实抓不到」要早点收尾，别让人对着按钮干等满一轮。
+       * 判据与阈值都在 IdleGuard 里（no-traffic / no-match / stuck），
+       * 核心是「流量有没有进来、进来的是不是目标」，不是「等了多久」。
+       */
+      const interceptedAtStart = Number(ctx.proxy?.stats?.intercepted) || 0
+      const trafficAtStart = Number(ctx.proxy?.stats?.total) || 0
+      /** 提前收尾的原因；空串表示正常走完（凑齐或到点） */
+      let earlyExit = ''
+      /**
        * 窗口内看住系统代理：Clash 这类工具是随时可能重写配置的（用户去点一下开关就没了），
        * 所以抓包期间每 5 秒回读一次，被改走就抢回来。
        * 最多抢 3 次 —— 跟一个反复争夺的软件死磕没有意义，日志里说明就行。
@@ -370,26 +519,52 @@ routers.push(
       let reasserts = 0
       /**
        * 抓齐之后再收一小会儿：同一批响应里常带着别的字段。
-       * 手机号没到手时多等一会儿（6 秒）—— 凤凰云智的手机号在 login2 / getaccountid
-       * 这两个接口的响应体里（`data.bizValue.account.mobile`），它们往往比 cookie 晚一拍，
-       * 立刻收工就会白白错过，只能退回账号兜底。
+       *
+       * 600ms 是「这次刷新的流量已经抓到了」的情形 —— 原来在手机号没到手时硬等 6 秒，
+       * 而手机号卡住的真实原因是字段名对不上（后台 phone / 流量 mobile），不是「来得晚」，
+       * 等多久都不会出现。
+       * 1500ms 是「只靠窗口开始前的旧记录就凑齐了」的情形：那批 sid / tid 可能是上一次
+       * 会话的，多给一点时间让这次刷新带来的新值把它们替换掉，别把过期值当结果交出去。
        */
+      const SETTLE_FRESH_MS = 600
+      const SETTLE_STALE_MS = 1500
+      /** 其它必填都齐了之后，单独等手机号的宽限 */
+      const PHONE_GRACE_MS = 2500
       let settleUntil = 0
-      let settleMs = 2000
+      let phoneGraceUntil = 0
       while (Date.now() < deadline) {
         if (ctx.captureStop) {
           stopped = true
           break
         }
-        if (mustCapture.every((key) => values[key])) {
+        /** 第一拍消费掉「代理本来就在跑」那次后台回读，不阻塞点击到开始抓包的这段 */
+        if (pendingSysCheck) {
+          const now = await pendingSysCheck
+          pendingSysCheck = null
+          if (!now.ok && !now.error && reasserts < 3) {
+            reasserts += 1
+            await ctx.systemProxy.reapply(port).catch(() => {})
+            lastSysCheck = Date.now()
+            api.log('warn', `系统代理被改回 ${now.actual || '空'}，已重新接管`)
+          }
+        }
+        const restReady = restKeys.every((key) => values[key])
+        const phoneReady = [...phoneKeys].every((key) => values[key])
+        if (restReady && phoneReady) {
           if (!settleUntil) {
-            const needPhone = phoneFromAccount.some((key) => !values[key])
-            settleMs = needPhone ? 6000 : 2000
-            settleUntil = Date.now() + settleMs
+            settleUntil = Date.now() + (freshHit ? SETTLE_FRESH_MS : SETTLE_STALE_MS)
           }
           if (Date.now() >= settleUntil) break
+        } else if (restReady) {
+          /**
+           * 只差手机号：它在响应体里，比 cookie / 请求体晚到一点点。
+           * 给它 2.5 秒，抓不到就带着其它字段收工（界面会单独提示手机号没抓到）。
+           */
+          if (!phoneGraceUntil) phoneGraceUntil = Date.now() + PHONE_GRACE_MS
+          if (Date.now() >= phoneGraceUntil) break
         }
-        await new Promise((resolve) => setTimeout(resolve, 700))
+        // 250ms 一拍：用户刷完页面 1 秒内就该看到结果，别让人盯着空白等了
+        await new Promise((resolve) => setTimeout(resolve, 250))
         scanNew()
 
         if (Date.now() - lastSysCheck >= 5000) {
@@ -411,7 +586,37 @@ routers.push(
               }
             }
             await ctx.systemProxy.reapply(port).catch(() => {})
-            api.log('warn', `系统代理被改回 ${now.actual || '空'}，已重新接管（第 ${reasserts} 次）`)
+            api.log(
+              'warn',
+              `系统代理被改回 ${now.actual || '空'}，已重新接管（第 ${reasserts} 次）`
+            )
+          }
+        }
+
+        /**
+         * 提前收尾：三种「再等也不会变」的情形（判据见 IdleGuard）。
+         * 只在还没抓到任何值时才考虑 —— 已经填了几栏的，交给 settle / phoneGrace 正常收工。
+         */
+        if (!stopped && !Object.keys(values).length) {
+          const traffic = (Number(ctx.proxy?.stats?.total) || 0) - trafficAtStart
+          const intercepted = (Number(ctx.proxy?.stats?.intercepted) || 0) - interceptedAtStart
+          const verdict = decideEarlyExit({
+            waitedMs: Date.now() - startedAt,
+            intercepted,
+            traffic,
+            acceptedCount: accepted.length,
+            gotCount: 0,
+            // 全量解密时解密条数不代表「目标系统来流量了」，no-match 要跳过（同 IdleGuard 注释）
+            loose
+          })
+          if (verdict) {
+            earlyExit = verdict
+            api.log(
+              'warn',
+              `提前收尾（${verdict}）：本轮 ${traffic} 条连接 / 解密 ${intercepted} 条 / ` +
+                `命中目标请求 ${accepted.length} 条，一个参数都没取到`
+            )
+            break
           }
         }
       }
@@ -419,35 +624,55 @@ routers.push(
       scanNew()
 
       /**
-       * 手机号兜底：抓不到就用出票账号填上（上面已确认账号本身就是手机号）。
-       * 真抓到了就不覆盖 —— 抓到的永远优先。
-       */
-      const fromAccount = []
-      for (const key of phoneFromAccount) {
-        if (!values[key]) {
-          values[key] = account
-          fromAccount.push(key)
-        }
-      }
-      if (fromAccount.length) api.log('info', `手机号取自出票账号（${account}）`)
-
-      /**
        * `missing` 只算必填：会员成本 / 备注这类人工字段永远抓不到，
        * 把它们算进「还没抓到」会让界面在抓齐成功时也报红。
        */
       const missing = required.filter((key) => !values[key])
-      const complete = missing.length === 0
+      /**
+       * 手机号单独归类：
+       *   - phoneMissing：只在响应体里出现的手机号没抓到 —— 界面提示话术不一样；
+       *   - realMissing：其它必填缺项 —— 这才说明「字段名对不上 / 没流量」，要写诊断文件。
+       * 「抓齐」的口径是**全部必填（含手机号）**，不再把手机号当成永远抓不到的那一栏。
+       */
+      const phoneMissing = missing.filter((key) => phoneKeys.has(key))
+      const realMissing = missing.filter((key) => !phoneKeys.has(key))
+      const complete = required.length > 0 && missing.length === 0
 
       let reason = ''
-      if (missing.length) {
-        reason = diagnoseMiss(accepted, focus)
+      if (realMissing.length && !earlyExit) {
+        reason = diagnoseMiss(accepted, focus, realMissing)
         api.log(
           'warn',
-          `抓包未凑齐：缺 ${missing.join('、')}（命中记录 ${accepted.length} 条）` +
+          `抓包未凑齐：缺 ${realMissing.join('、')}（命中记录 ${accepted.length} 条）` +
             (reason ? `｜${reason}` : '')
         )
         const file = dumpMiss(ctx, systemCode, required, values, accepted)
         if (file) api.log('warn', `抓包诊断已写入 ${file}（需要排查时把这个文件发出来）`)
+      } else if (realMissing.length && earlyExit) {
+        /**
+         * 提前收尾时不写诊断文件：这三种情况的原因已经确定（没流量 / 流量不匹配 / 字段名不对），
+         * 抱着诊断文件去猜反而更慢。话术要给出下一步动作。
+         */
+        const scopeText = [...focus].join('、') || '未锁定'
+        if (earlyExit === 'no-traffic') {
+          reason =
+            '这段时间没有任何连接经过代理，所以没有参数。' +
+            '先确认刷新页面时走的是本机代理（面板上看「连接」这一行），再点一次获取参数'
+        } else if (earlyExit === 'no-match') {
+          reason =
+            `解密了几十条流量，但没有一条落在 ${scopeText} 上。` +
+            '展开面板「直通域名」看目标系统的域名在不在里面；在的话把它发我，我加进域名表'
+        } else {
+          reason =
+            `目标请求抓到了，但 ${realMissing.join('、')} 始终没出现 —— ` +
+            '多半是接口里的字段名和配置对不上，把面板里那条命中请求的响应原文发我'
+        }
+      } else if (phoneMissing.length) {
+        api.log(
+          'warn',
+          `除手机号外已抓齐（${phoneMissing.join('、')} 只在 getaccountid 这类响应体里），` +
+            '自动停止抓包；若反复抓不到，多半是响应体没解开'
+        )
       } else {
         api.log('info', `必填参数已抓齐（${required.join('、')}），自动停止抓包`)
       }
@@ -456,12 +681,21 @@ routers.push(
         ok: true,
         values,
         missing,
-        // 必填全部到手：界面据此提示「已自动停止」，不是超时失败
+        // 必填全部到手（含手机号）：界面据此提示「已自动停止」，不是超时失败
         complete,
-        // 这些字段不是抓到的，是直接用出票账号补的（目前只有手机号）
-        fromAccount,
+        // 手机号单独回给界面：它只在响应体里，缺了要提示「刷新页面再抓一次」
+        phoneMissing,
         // 没抓齐时的一句话原因：是没流量、没登录，还是字段名对不上
         reason,
+        /**
+         * 一个值都没抓到。
+         *
+         * 界面上要当「这套系统这次没有参数」处理，不要报成错误 ——
+         * 有的程序本来就没有可抓的东西，空就是正常结果。
+         */
+        empty: !Object.keys(values).length,
+        // 提前收尾的原因（no-traffic / no-match / stuck），空串表示正常走完
+        earlyExit,
         hints: missing.length ? { ...describeTraffic(accepted), scope: [...focus] } : null,
         // 用户点了「停止」而不是等满窗口：界面提示要说「保留已抓到的」，不算失败
         stopped,
@@ -473,9 +707,32 @@ routers.push(
       }
     } finally {
       ctx.captureStop = false
-      // 解密范围只在这次窗口内有效：复位后除「设置 → 抓包规则」外一律隧道直通
-      ctx.focusHosts = null
-      if (loose) ctx.interceptAll = false
+      ctx.captureFastFlush = false
+      /**
+       * 解密范围**不能**在这里清空。
+       *
+       * 窗口结束后代理还在跑、系统代理仍然指向本机，此时把 focusHosts 置空，
+       * 之后每一次刷新都会隧道直通：面板上表现为「190 条连接 · 0 解密 · 解密范围 -」，
+       * 用户看到的结论就是「抓包坏了」，其实只是窗口关早了。
+       * 真正需要复位的是「全量解密」——那个才是拖慢页面、混进无关凭证的元凶。
+       *
+       * 所以：锁定过域名族就保留，让窗口外的刷新继续被解密、继续进面板；
+       * 没锁定过（未登记系统）关掉全量解密，避免采集结束后还在解全站 HTTPS。
+       * 彻底复位放在 stopProxy()。
+       */
+      if (focus.size) {
+        ctx.focusHosts = focus
+      } else {
+        ctx.focusHosts = null
+      }
+      /**
+       * 全量解密只在窗口内有效，窗口一关必须复位。
+       *
+       * 这一行原来写在 else 分支里，靠「loose 只可能在 focus 为空时成立」这个巧合才没出事。
+       * mini 这类「有已知族、但域名不固定」的系统让 focus 非空与 loose 同时成立，
+       * 漏掉它就会在采集结束、窗口关掉之后继续解全站 HTTPS。
+       */
+      ctx.interceptAll = false
     }
   })
 )
@@ -588,7 +845,8 @@ routers.push(
 routers.push(
   new EventRoute('ca:info', 'invoke', async (api) => {
     const { ctx } = api
-    const probe = await probeCaInstalled(ctx.ca.getFingerprint())
+    // fresh：状态栏要的是眼下的事实，不能拿 30 秒内的缓存糊过去
+    const probe = await probeCaInstalled(ctx.ca.getFingerprint(), { fresh: true })
     const installed = probe === 'yes'
 
     /**
@@ -648,6 +906,8 @@ routers.push(
       ].join('\n')
 
       await ps(script)
+      // 刚装完必须真查一遍，不能沿用安装前的缓存结论
+      invalidateCaCache()
       const installed = await checkCaInstalled(ctx.ca.getFingerprint())
       return { ok: installed, message: installed ? '证书已安装' : '安装后校验未通过' }
     } catch (e) {
@@ -679,6 +939,7 @@ routers.push(
       // 证书本来就不在时 certutil 返回非 0，不算失败，交给下面统一复核
     }
 
+    invalidateCaCache()
     const installed = await checkCaInstalled(fingerprint)
     if (installed) {
       return { ok: false, message: '卸载未生效，证书仍在受信任的根证书颁发机构里' }
@@ -745,10 +1006,150 @@ routers.push(
   })
 )
 
+/**
+ * 抓包面板的数据源：最近 N 条请求 + 每条记录按当前字段清单解析出来的值。
+ *
+ * 为什么解析放主进程：pickValues 要翻 cookie / 请求头 / 请求体 / 响应体四层，
+ * 渲染层拿到的记录里没有 body（体积太大不该走 IPC）。这里一次性算完，
+ * 顺便把「合并结果」也拼好，界面只管画。
+ *
+ * `skipped` 是本次会话被过滤掉的请求数（图片 / 字体 / OPTIONS / 页面 HTML）。
+ * 抓不到参数时它是最快的定位线索：skipped 很大而 total 是 0，说明过滤把自己人筛了；
+ * 两个都是 0，说明根本没有流量经过代理。
+ */
 routers.push(
-  new EventRoute('captures:clear', 'invoke', async (api) => {
-    api.ctx.captures = []
-    return { ok: true }
+  new EventRoute('captures:inspect', 'invoke', async (api, data) => {
+    const { ctx } = api
+    const params = data.params || {}
+    const keys = Array.isArray(params.keys) ? params.keys.filter(Boolean).map(String) : []
+    const limit = Math.min(Math.max(Number(params.limit) || 60, 1), 200)
+    const list = ctx.captures.slice(-limit)
+
+    /**
+     * 全量解密期间（mini 这类域名不固定的系统）缓冲里混着同一轮的其它接口：
+     * 它们的 token / mobile 同名字段会被合并进来，表现成「填了但不是这台影城的」。
+     * 所以合并只认「域名族内 或 路径命中系统特征」的记录；面板列表仍显示全部，
+     * 找不到目标域名时还能靠它看出实际打的是哪个域名。
+     */
+    const scopedCode = ctx.captureSystemCode || ''
+    const looseSystem = isLooseSystem(scopedCode)
+    const inScope = (record) => {
+      if (!looseSystem) return true
+      if (ctx.focusHosts && ctx.focusHosts.size && inFamily(record.host, ctx.focusHosts)) return true
+      return pathMatchesSystem(scopedCode, record.path)
+    }
+
+    // 按时间从旧到新合并：后抓到的覆盖先抓到的，跟「获取参数」的口径一致
+    const merged = {}
+    const records = list.map((record) => {
+      const got = pickValues(record, keys)
+      if (inScope(record)) Object.assign(merged, got)
+      return {
+        id: record.id,
+        at: record.at,
+        method: record.method,
+        host: record.host,
+        path: record.path,
+        statusCode: record.statusCode,
+        duration: record.duration,
+        /**
+         * 响应体字节数。
+         * 只在报文里取不到字段时最有用：0B 说明响应体压根没进来（压缩解不开 / 跳转无 body），
+         * 有内容却取不到才是字段名或嵌套深度的问题 —— 两者处理方式完全不同。
+         */
+        bodyLen: (record.resBody || '').length,
+        // 范围外的记录即使解析出同名字段也不能标绿：它不是这台影城的流量
+        hit: inScope(record) && Object.keys(got).length > 0,
+        params: got
+      }
+    })
+
+    return {
+      ok: true,
+      // 缓冲里总条数 vs 本次返回条数：数字差太大说明窗口取小了
+      total: ctx.captures.length,
+      skipped: Number(ctx.proxy?.stats?.skipped) || 0,
+      // 最近被筛掉的几条（带原因）：面板上「已跳过 N 条」不是冷数字，点开能看是哪几条
+      skippedItems: (ctx.skippedCaptures || []).slice(-12),
+      proxyRunning: Boolean(ctx.proxyRunning),
+      // 标志为 true 还不够：真连一下端口，才知道浏览器能不能连上来
+      proxyListening: ctx.proxyRunning ? await probePort(ctx.proxy?.port) : false,
+      proxyPort: ctx.proxy?.port || 0,
+      /**
+       * CONNECT 层的连接计数，全给渲染层。
+       *
+       * 这三个数是「一条都没有」时的分诊依据，缺了就只能靠猜：
+       *   total = 0            → 代理一条连接都没收到，流量压根没走系统代理
+       *   total > 0 且 tunneled = total → 收到了但全被判成「不用解密」，域名族对不上
+       *   intercepted > 0 但请求 0 → 解密了却没入库，是记录/过滤层的 bug
+       */
+      stats: {
+        total: Number(ctx.proxy?.stats?.total) || 0,
+        intercepted: Number(ctx.proxy?.stats?.intercepted) || 0,
+        tunneled: Number(ctx.proxy?.stats?.tunneled) || 0,
+        skipped: Number(ctx.proxy?.stats?.skipped) || 0,
+        failed: Number(ctx.proxy?.stats?.failed) || 0
+      },
+      /**
+       * 实际被隧道直通的域名（次数降序，最多 12 条）。
+       * 目标系统的域名出现在这里，就说明解密范围配错了 —— 不用再靠猜。
+       */
+      tunneledHosts: [...(ctx.proxy?.tunneledHosts || new Map())]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 12)
+        .map(([host, count]) => ({ host, count })),
+      focus: ctx.focusHosts ? [...ctx.focusHosts] : [],
+      // 本次抓包用的系统代号：解密范围为空时，用它判断是不是代号没被认出来
+      systemCode: ctx.captureSystemCode || '',
+      // 路径特征（mini 的 miniticket）：有值时说明「域名不一定在族内，靠路径也认」
+      pathHints: pathHintsOf(ctx.captureSystemCode),
+      keys,
+      merged,
+      records: records.reverse()
+    }
+  })
+)
+
+routers.push(
+  new EventRoute('captures:clear', 'invoke', async (api, data) => {
+    const { ctx } = api
+    const params = (data && data.params) || {}
+    ctx.captures = []
+    ctx.pendingCaptures = []
+    // 计数和明细一起清零：只清 filtered 会让面板显示 0、但展开里还是旧条目；
+    // total/tunneled 不清则「清空记录」后连接数还在涨，看不出这一轮到底有没有流量
+    if (ctx.proxy?.stats) {
+      Object.assign(ctx.proxy.stats, { total: 0, intercepted: 0, tunneled: 0, failed: 0, skipped: 0 })
+    }
+    if (Array.isArray(ctx.skippedCaptures)) ctx.skippedCaptures.length = 0
+    // 直通域名也清：留着旧的一轮，「直通域名」列表会和新的连接数对不上
+    if (ctx.proxy?.tunneledHosts) ctx.proxy.tunneledHosts.clear()
+
+    /**
+     * 带 systemCode 时顺手把解密范围换成这家系统（显式传空串也算「换一轮，先清空」）。
+     *
+     * 打开参数弹窗就调这一支：不换的话，点「365系统」时面板「解密范围」还挂着上一家
+     * （凤凰的 mtop），而缓冲里也仍是上一家的记录 —— 同名字段（mobile / token / ticket）
+     * 会被面板回填进 365 的表格，表现成「还没点获取参数就全填满了」。
+     *
+     * 「清空记录」按钮不传这个字段，所以它不会把正在用的解密范围弄丢。
+     * 这里只做预备：`interceptAll` 不在这里打开，真正放开全量解密是抓包窗口的事。
+     */
+    if (params.systemCode !== undefined) {
+      const systemCode = String(params.systemCode || '').trim()
+      const hosts = systemCode ? seedHosts(systemCode) : []
+      ctx.focusHosts = hosts.length ? new Set(hosts) : null
+      ctx.captureSystemCode = hosts.length ? systemCode : ''
+      ctx.interceptAll = false
+    }
+
+    return {
+      ok: true,
+      systemCode: ctx.captureSystemCode || '',
+      focus: ctx.focusHosts ? [...ctx.focusHosts] : [],
+      // 域名不固定的系统要把路径特征也亮出来，否则面板只显示一个族名会让人以为只盯这一个域
+      pathHints: pathHintsOf(ctx.captureSystemCode)
+    }
   })
 )
 
@@ -827,6 +1228,18 @@ routers.push(
 )
 
 /**
+ * 这个字段是不是「人工填」的那几列。
+ *
+ * 参数弹窗里除了抓包字段，还混着会员成本 / 会员折扣 / 备注这种运营手填的项，
+ * 它们永远不会出现在流量里。老数据没有 required 标记时只能靠名字识别，
+ * 否则「抓到什么程度算完」的条件永远不成立，用户每次都得干等满 45 秒。
+ */
+function isManualField(key) {
+  // 用包含判断：后台写法不统一（会员成本 / 会员成本折扣 / 影院备注…），整串相等必然漏
+  return /备注|说明|成本|折扣|note|remark|memo|comment|discount|cost|fee|price/i.test(String(key || '').trim())
+}
+
+/**
  * 没抓齐时，判断到底卡在哪一步，只回一句人话。
  *
  * 「没抓到」这三种原因的处理方式完全不同，不区分就只能让用户反复重试：
@@ -834,17 +1247,47 @@ routers.push(
  *   2. 有请求但没有登录请求 → 用户是在点「获取参数」**之前**登录的，流量早过去了；
  *   3. 有登录请求但字段没对上 → 字段名不同，要靠诊断文件看真实报文。
  */
-function diagnoseMiss(accepted, focus) {
+function diagnoseMiss(accepted, focus, missing = []) {
   if (!accepted.length) {
     const scope = focus && focus.size ? [...focus].join('、') : ''
     return scope
       ? `本次没有收到 ${scope} 的任何请求：页面可能还没刷新，或系统代理没生效`
       : '本次没有收到任何请求：页面可能还没刷新，或系统代理没生效'
   }
-  if (!accepted.some(looksLikeLogin)) {
-    return `本次收到 ${accepted.length} 条请求，但里面没有登录请求 —— 请先在浏览器里退出登录，再点登录`
+
+  /**
+   * tid 单独说清楚，因为它和别的字段根本不是一路的。
+   *
+   * 实测（真实 HAR 逐条扫过）：tid **不在任何 cookie 里**，也不在请求头里，
+   * 它只出现在 `auth.getsidbytid` 这一条请求的请求体和响应体（`bizValue.tid`）。
+   * 而这条请求只在「登录」或「会话过期后换新 sid」时才发 —— 单纯刷新已登录的页面不会产生它。
+   * 不把这点讲明，用户会一直以为是抓包漏了，或者去 cookie 里翻一个根本不存在的东西。
+   */
+  if (missing.some((key) => String(key || '').trim().toLowerCase() === 'tid')) {
+    return (
+      '缺 tid：它不在 cookie 里，只出现在 auth.getsidbytid 这条请求的请求体 / 响应体里，' +
+      '而这条请求只在登录或会话刷新时才发。请在浏览器里退出登录、重新登录一次，再点「获取参数」'
+    )
   }
-  return `登录请求已经抓到，但这几个字段不在里面（字段名可能不同），诊断文件里有原始报文`
+
+  if (!accepted.some(looksLikeLogin)) {
+    return `本次收到 ${accepted.length} 条请求，但里面没有能取到这些字段的接口 —— 请在浏览器里刷新一下页面再试`
+  }
+
+  /**
+   * 名字压根没出现过，和「出现了但没解析出来」是两种完全不同的处置：
+   * 前者再怎么刷新页面也抓不到，说明这套接口不认这个字段（随映的 openId 就属于这种，
+   * 适配器发请求时只带 memberId / X-Access-Token / X-Sign，从头到尾不传 openId）。
+   */
+  const neverSeen = fieldsNeverSeen(accepted, missing)
+  if (neverSeen.length) {
+    return (
+      `这次抓到的 ${accepted.length} 条请求里完全没有出现过 ${neverSeen.join('、')} —— ` +
+      '要么这几个字段只在登录环节产生，要么这套接口根本不用它；可以先把它们改成非必填'
+    )
+  }
+
+  return `登录请求已经抓到，但 ${missing.join('、') || '这几个字段'} 不在里面（字段名可能不同），诊断文件里有原始报文`
 }
 
 /** 表单里的 JSON 是 URL 编码的，判断前先解一层 */

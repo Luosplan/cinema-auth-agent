@@ -21,7 +21,7 @@ import CertificateAuthority from './mitm/CertificateAuthority'
 import MitmProxy from './mitm/MitmProxy'
 import SystemProxy, { parseProxyServer } from './mitm/SystemProxy'
 import Extractor from './collectors/Extractor'
-import { inFamily } from './collectors/SystemDomains'
+import { inFamily, isNoiseHost, pathHintsOf } from './collectors/SystemDomains'
 import { checkCaInstalled } from './mitm/CaTrust'
 import ConfigStore from './store/ConfigStore'
 import CredentialStore from './store/CredentialStore'
@@ -51,7 +51,13 @@ const ctx = {
   logs: [],
   captures: [],
   pendingCaptures: [],
+  /** 被筛掉的请求（OPTIONS / 图片 / 页面 HTML…），抓包面板要显示「为什么没记录」 */
+  skippedCaptures: [],
   proxyRunning: false,
+  /** 抓包窗口内把节流压到 60ms，窗口结束复位（见 capture-params） */
+  captureFastFlush: false,
+  // 「获取参数」开始时主动冲一次缓冲，避免刚到的记录还在 pending 里看不到
+  flushCaptures: () => flushCaptures(),
   lockFile: '',
   dataDir: ''
 }
@@ -320,6 +326,15 @@ async function stopProxy() {
   if (!ctx.proxyRunning) return { running: false }
 
   ctx.proxyRunning = false
+  /**
+   * 解密范围随代理一起复位 —— 这是唯一该清空它的地方。
+   * 窗口结束不清（见 capture-params 的 finally），因为那时代理还在跑，
+   * 清了会让之后的刷新全部直通；代理真停了才没有任何解密的意义。
+   */
+  ctx.focusHosts = null
+  ctx.interceptAll = false
+  // 代号也一起清：代理停了还留着上一轮的值，面板会显示成「这次在盯谁」
+  ctx.captureSystemCode = ''
   await ctx.systemProxy.disable()
   await ctx.proxy.stop()
   clearLock()
@@ -393,6 +408,24 @@ function syncRestoreProxy() {
 }
 
 /**
+ * 把攒着的原始记录并进环形缓冲并推给界面。
+ *
+ * 抽出来是因为「获取参数」窗口要主动冲一次：常规节流是 400ms，
+ * 而那 400ms 里进来的记录还没进 ctx.captures，回扫就看不到 ——
+ * 用户刷完页面却要再等一拍才有结果，体感就是「慢」。
+ */
+function flushCaptures() {
+  const batch = ctx.pendingCaptures.splice(0, ctx.pendingCaptures.length)
+  if (!batch.length) return batch
+  ctx.captures.push(...batch)
+  if (ctx.captures.length > MAX_CAPTURES) {
+    ctx.captures.splice(0, ctx.captures.length - MAX_CAPTURES)
+  }
+  broadcast('capture-batch', batch)
+  return batch
+}
+
+/**
  * 抓包回调：先缓存原始记录，再尝试提取凭证。
  * 原始记录节流批量推送，否则高频请求会把渲染进程打满。
  */
@@ -401,16 +434,14 @@ function handleCapture(record) {
   if (ctx.pendingCaptures.length > 50) ctx.pendingCaptures.shift()
 
   if (!captureFlushTimer) {
+    /**
+     * 抓包窗口内把节流压到 60ms：结果是「刷一下页面就出参数」，
+     * 而不是等满一拍 400ms 才发现值已经在缓冲里躺着。
+     */
     captureFlushTimer = setTimeout(() => {
       captureFlushTimer = null
-      const batch = ctx.pendingCaptures.splice(0, ctx.pendingCaptures.length)
-      if (!batch.length) return
-      ctx.captures.push(...batch)
-      if (ctx.captures.length > MAX_CAPTURES) {
-        ctx.captures.splice(0, ctx.captures.length - MAX_CAPTURES)
-      }
-      broadcast('capture-batch', batch)
-    }, 400)
+      flushCaptures()
+    }, ctx.captureFastFlush ? 60 : 400)
   }
 
   try {
@@ -525,17 +556,35 @@ app.whenReady().then(async () => {
     ca: ctx.ca,
     /**
      * 解密范围的三层判定，顺序不能换：
-     *   1. 已锁定域名族（点某个影城时的常规路径）→ 只解密这一族，其余隧道直通；
-     *   2. 还没锁定 → 靠 `interceptAll` 临时全量放行，先抓到第一条目标流量再说；
+     *   1. 全量解密窗口 → 除噪声域名外全放：mini 这类**域名不固定**的系统必须走这一层，
+     *      只锁已知族一定会漏掉别家影城，靠路径特征（/MiniTicket/）识别到再收窄；
+     *   2. 已锁定域名族（点某个影城时的常规路径）→ 只解密这一族，其余隧道直通；
      *   3. 都没有 → 只解密「设置 → 抓包规则」里配过的域名。
+     *
+     * 第 1 层必须在第 2 层前面：mini 现在既有已知族（xcxyyww.cn）又要全量，
+     * 两条件同时成立时按全量走，否则「锁了族、别家域名进不来、路径特征永远看不到」。
      */
     matchHost: (host) => {
+      /**
+       * 兜底的全量解密也要排掉噪声域名（埋点 / CDN / 地图 / 字体）。
+       * 它们永远不带凭证，解密它们只会多签一堆证书、把页面拖慢，
+       * 顺便把同名 phone / cookie 混进取值里。
+       */
+      if (ctx.interceptAll) return !isNoiseHost(host)
       if (ctx.focusHosts && ctx.focusHosts.size) return inFamily(host, ctx.focusHosts)
-      if (ctx.interceptAll) return true
       return Boolean(ctx.extractor.matchHost(host))
-    }
+    },
+    /**
+     * 路径特征跟着当前系统走：mini 的接口是 `/MiniTicket/index.php`（PHP），
+     * 报文常挂 `text/html` 回来，不带它会被当页面 HTML 丢掉。
+     */
+    pathHints: () => pathHintsOf(ctx.captureSystemCode)
   })
   ctx.proxy.onCapture = handleCapture
+  ctx.proxy.onSkip = (info) => {
+    ctx.skippedCaptures.push(info)
+    if (ctx.skippedCaptures.length > 40) ctx.skippedCaptures.shift()
+  }
   ctx.proxy.onLog = log
 
   // 挂到 ctx 上，供渲染层的 IPC 路由调用

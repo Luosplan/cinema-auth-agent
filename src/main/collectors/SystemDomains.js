@@ -41,8 +41,19 @@ const SEEDS = {
   'cx-middleground': ['oristarcloud.com'],
   blwh: ['oristarcloud.com'],
 
-  suiying: ['shallyim.com'],
-  sgycyk: ['shallyim.com'],
+  // 随映：接口在 api.shallyim.com 的各租户子域（36010.api.shallyim.com）
+  suiying: ['shallyim.com', 'api.shallyim.com'],
+  sgycyk: ['shallyim.com', 'api.shallyim.com'],
+
+  /**
+   * MiniTicket：**域名不固定**，每家影院自己的域名（xzs11.xcxyyww.cn 只是一家）。
+   *
+   * 这里登记的族只是「已知的那一批」，认不全 —— 兜底靠路径特征，
+   * 见下面的 PATH_HINTS：mini 的接口统一挂在 `<host>/MiniTicket/index.php` 下
+   *（服务端 ticket-adapters/mini/Base.js 的 API_ENTRY 就是这个），
+   * 所以域名对不上、路径里有 MiniTicket 的同样是这套系统。
+   */
+  mini: ['xcxyyww.cn'],
   360: ['yingyuan360.cn'],
   yingyuan360: ['yingyuan360.cn'],
   365: ['poke203.com'],
@@ -163,13 +174,92 @@ export function isNoiseHost(host) {
   return false
 }
 
-/** 已知系统的固定域名族；没登记过返回空数组（调用方走「全量解密」兜底） */
-export function seedHosts(systemCode) {
-  const code = String(systemCode || '')
+/**
+ * 系统代号归一：去空格、下划线/点折成连字符。
+ * 服务端同一个系统在不同表里写成 `phoenix-h5` / `phoenix_h5` / `Phoenix-H5` 都出现过，
+ * 只要有一步没折平，seedHosts 就查不到，最后退化成「全量解密」——
+ * 表现就是又慢又混进一堆无关请求。
+ */
+function normCode(value) {
+  return String(value || '')
     .trim()
     .toLowerCase()
-  if (!code) return ZERO
-  return SEEDS[code] || ZERO
+    .replace(/[\s_.]+/g, '-')
 }
 
-export default { registrableOf, inFamily, isNoiseHost, seedHosts }
+/**
+ * 路径特征：认域名认不准时的第二把尺子。
+ *
+ * 少数系统的域名根本不固定 —— mini 每家影院一个独立域名，域名表永远补不完。
+ * 但它们的接口路径是固定的：mini 统一挂在 `<host>/MiniTicket/index.php` 下
+ *（服务端 ticket-adapters/mini/Base.js 的 API_ENTRY，注释原话「各影院只是域名不同」）。
+ *
+ * 所以「域名对不上、但路径里有 MiniTicket」的请求也算这套系统：
+ *   - 抓包窗口里凭它把请求收进线索（并顺手把该域名并进解密范围）；
+ *   - 面板合并取值时凭它排除掉同一轮里混进来的其它接口。
+ *
+ * 关键字写小写，匹配时对路径做小写化，`/MiniTicket/` 与 `/miniticket/` 都认。
+ */
+const PATH_HINTS = {
+  mini: ['miniticket']
+}
+
+/** 长 key 优先：phoenix-jiaying 必须先于 phoenix 命中，否则会漏掉它的 h5web */
+const SEED_KEYS_BY_LENGTH = Object.keys(SEEDS).sort((a, b) => b.length - a.length)
+const HINT_KEYS_BY_LENGTH = Object.keys(PATH_HINTS).sort((a, b) => b.length - a.length)
+
+/** 已知系统的固定域名族；没登记过返回空数组（调用方走「全量解密」兜底） */
+export function seedHosts(systemCode) {
+  const code = normCode(systemCode)
+  if (!code) return ZERO
+  if (SEEDS[code]) return SEEDS[code]
+
+  /**
+   * 变体兜底：`phoenix-h5-x` / `phoenix-jinri` 这类带尾巴的代号，
+   * 归到同前缀的已知系统上。必须按 `前缀 + 分隔符` 对齐，
+   * 不能用裸 startsWith —— 否则 `phoenixfoo` 也会被认成 phoenix。
+   */
+  for (const key of SEED_KEYS_BY_LENGTH) {
+    if (code.startsWith(`${key}-`)) return SEEDS[key]
+  }
+  return ZERO
+}
+
+/** 这套系统的路径特征关键字；没有就返回空数组 */
+export function pathHintsOf(systemCode) {
+  const code = normCode(systemCode)
+  if (!code) return ZERO
+  if (PATH_HINTS[code]) return PATH_HINTS[code]
+  // `mini-v1` / `mini-xxxshdz` 这类变体沿用同一套特征
+  for (const key of HINT_KEYS_BY_LENGTH) {
+    if (code.startsWith(`${key}-`)) return PATH_HINTS[key]
+  }
+  return ZERO
+}
+
+/** 这条请求的路径是否带该系统特征（域名认不出来时的兜底） */
+export function pathMatchesSystem(systemCode, path) {
+  const hints = pathHintsOf(systemCode)
+  if (!hints.length) return false
+  const text = String(path || '').toLowerCase()
+  if (!text) return false
+  return hints.some((hint) => text.includes(hint))
+}
+
+/**
+ * 域名族不可靠的系统（各影院独立域名）：抓包时要放开全量解密，靠路径特征收窄。
+ * 只有这种系统允许「既有域名族、又全量解密」同时成立。
+ */
+export function isLooseSystem(systemCode) {
+  return pathHintsOf(systemCode).length > 0
+}
+
+export default {
+  registrableOf,
+  inFamily,
+  isNoiseHost,
+  seedHosts,
+  pathHintsOf,
+  pathMatchesSystem,
+  isLooseSystem
+}
