@@ -4,6 +4,7 @@ import net from 'node:net'
 import tls from 'node:tls'
 import zlib from 'node:zlib'
 import { randomUUID } from 'node:crypto'
+import { captureVerdict } from '../collectors/RecordFilter.js'
 
 const MAX_CAPTURE_BYTES = 512 * 1024
 const UPSTREAM_TIMEOUT = 30000
@@ -18,15 +19,36 @@ const UPSTREAM_TIMEOUT = 30000
  *     宁可少抓一条，也不在客户机器上制造可被利用的降级通道。
  */
 export default class MitmProxy {
-  constructor({ ca, matchHost }) {
+  constructor({ ca, matchHost, pathHints }) {
     this.ca = ca
     this.matchHost = matchHost || (() => false)
+    /**
+     * 当前系统的路径特征（mini 的 /MiniTicket/）。
+     *
+     * 只为一件事：PHP 那类系统的接口常把 JSON 挂在 `text/html` 上发回来，
+     * 按「页面 HTML」丢掉就永远抓不到；路径带特征时不能当页面处理。
+     * 传函数而不是数组：抓包过程中系统代号可能被换成另一家。
+     */
+    this.pathHints = typeof pathHints === 'function' ? pathHints : () => []
     this.server = null
     this.mitmServer = null
     this.port = 0
     this.onCapture = null
+    this.onSkip = null
     this.onLog = null
-    this.stats = { total: 0, intercepted: 0, tunneled: 0, failed: 0 }
+    this.stats = { total: 0, intercepted: 0, tunneled: 0, failed: 0, skipped: 0 }
+    /**
+     * 被隧道直通的域名与次数。
+     *
+     * 「一条请求都没有」最难判断的就是：到底是浏览器没走代理，还是走了但域名不在解密范围。
+     * 把直通的域名记下来，面板上一列就能看出真相 ——
+     * 如果目标系统的域名赫然出现在这里，说明解密范围配错了，不用再猜。
+     *
+     * 上限按「不同域名数」算：一次刷新几十上百条连接很常见，200 足够覆盖，
+     * 超出后按最冷门淘汰（见 noteTunneled），保证热点域名不被丢掉。
+     */
+    this.tunneledHosts = new Map()
+    this.tunneledLimit = 200
     /** 上游代理（通常是用户正在用的 Clash / V2Ray），null 表示直连 */
     this.upstream = null
     this._httpAgent = null
@@ -112,6 +134,7 @@ export default class MitmProxy {
 
     if (!this.shouldIntercept(host)) {
       this.stats.tunneled++
+      this.noteTunneled(host)
       return this.tunnel(host, port, clientSocket, head)
     }
 
@@ -186,6 +209,40 @@ export default class MitmProxy {
   }
 
   /**
+   * 记一笔直通的域名。
+   *
+   * 表满时挤掉**最少见**的那个，而不是拒绝新域名：
+   * 一刷新就是上百条连接（CDN、埋点、图片各自不同域），先到先得会把真正的接口域名挤在外面，
+   * 面板上表现为「190 条连接，榜首才 4 次」——数字全错，等于没记。
+   * 挤掉冷门域名后，热点域名（往往就是目标接口）始终留在表里。
+   */
+  noteTunneled(host) {
+    const h = String(host || '')
+      .toLowerCase()
+      .trim()
+    if (!h) return
+    const cur = this.tunneledHosts.get(h)
+    if (cur !== undefined) {
+      this.tunneledHosts.set(h, cur + 1)
+      return
+    }
+    if (this.tunneledHosts.size >= this.tunneledLimit) {
+      let coldKey = null
+      let coldVal = Infinity
+      for (const [key, val] of this.tunneledHosts) {
+        if (val < coldVal) {
+          coldVal = val
+          coldKey = key
+          // val 最小就是 1，不可能更小，直接停
+          if (coldVal === 1) break
+        }
+      }
+      if (coldKey !== null) this.tunneledHosts.delete(coldKey)
+    }
+    this.tunneledHosts.set(h, 1)
+  }
+
+  /**
    * 明文 HTTP（极少见，但暖通类系统和部分降级接口仍会走）
    *
    * 接管系统代理期间这里是**全量入口**，不能再对没命中的域名回 502 ——
@@ -218,6 +275,19 @@ export default class MitmProxy {
     const headers = { ...clientReq.headers }
     delete headers['proxy-connection']
     delete headers['proxy-authorization']
+    /**
+     * 压缩算法必须收窄。
+     *
+     * Chrome 现在会发 `accept-encoding: gzip, deflate, br, zstd`，阿里 mtop 这类服务端
+     * 看到 zstd 就真按 zstd 回 —— 而 Electron 31 内置的是 Node 20，**没有 zstd 解码器**。
+     * 结果就是我们拿到一段二进制，解不开、JSON 也 parse 不了，
+     * 于是「cookie 里的 tid / _m_h5_tk 都抓到了，唯独只在响应体里的手机号永远抓不到」。
+     *
+     * 只留我们解得开的三种：改请求头比事后猜编码靠谱得多，也不用碰签名（sign 只算 query）。
+     */
+    if (headers['accept-encoding']) {
+      headers['accept-encoding'] = narrowEncoding(headers['accept-encoding'])
+    }
 
     const options = {
       host,
@@ -250,6 +320,33 @@ export default class MitmProxy {
         clientRes.end()
         // 未命中的域名只是借道出网，不进抓包缓冲
         if (!capture) return
+        /**
+         * 命中的域名也要再看一眼这条请求值不值得留：
+         * 页面刷新会连着拉一堆图片 / 字体 / 脚本 / 页面 HTML，
+         * 它们会把环形缓冲里真正有用的接口记录挤掉，抓包等待就一直命中不了。
+         * 只放行 GET / POST 且非静态资源（判定见 RecordFilter）。
+         */
+        const verdict = captureVerdict(
+          {
+            method: clientReq.method,
+            path: clientReq.url,
+            statusCode: upstreamRes.statusCode,
+            resHeaders: upstreamRes.headers
+          },
+          this.pathHints()
+        )
+        if (!verdict.ok) {
+          this.stats.skipped++
+          // 把「为什么丢」回传给界面：不然面板上只会显示「一条都没抓到」
+          this.emitSkip({
+            host,
+            method: clientReq.method,
+            path: clientReq.url,
+            statusCode: upstreamRes.statusCode,
+            reason: verdict.reason
+          })
+          return
+        }
         this.emitCapture({
           id: randomUUID(),
           at: new Date().toISOString(),
@@ -313,6 +410,22 @@ export default class MitmProxy {
         this.onCapture(record)
       } catch (e) {
         this.log('error', `采集回调异常: ${e.message}`)
+      }
+    }
+  }
+
+  /**
+   * 上报「这条被筛掉了」。
+   *
+   * 抓包页右侧那块面板靠它显示「已跳过 N 条」和具体原因 ——
+   * 没有这个，用户面对空表格只能猜是代理没生效还是页面没刷新。
+   */
+  emitSkip(info) {
+    if (typeof this.onSkip === 'function') {
+      try {
+        this.onSkip(info)
+      } catch {
+        /* 诊断信息丢了不影响主流程 */
       }
     }
   }
@@ -455,18 +568,69 @@ function splitHostPort(value) {
 }
 
 /**
- * 按 content-encoding 解压。微信侧大量接口用 gzip，不解压拿到的是乱码。
+ * 把 Accept-Encoding 收窄到「本进程能解开的」算法。
+ *
+ * Node 20（Electron 31 内置）没有 zstd 解码器，22.15+ 才有。
+ * 这里不赌运行环境，直接把它从请求头里摘掉：服务端就不会回 zstd，
+ * 解密出的响应体才可能是能 parse 的 JSON。
  */
-function decodeBody(buffer, encoding) {
+export function narrowEncoding(value) {
+  const supported = []
+  for (const raw of String(value || '').split(',')) {
+    const name = raw.split(';')[0].trim().toLowerCase()
+    if (!name) continue
+    if (name === 'gzip' || name === 'deflate' || name === 'br' || name === 'identity') {
+      if (!supported.includes(name)) supported.push(name)
+    }
+    // zstd / 其它新算法一律丢弃：解不开的编码等于没抓到
+  }
+  return supported.length ? supported.join(', ') : 'gzip, deflate, br'
+}
+
+/** zstd 只在 Node 22.15+ 有；没有就明确抛错，交给上层返回空串而不是乱码 */
+function zstdDecompress(buffer) {
+  if (typeof zlib.zstdDecompressSync === 'function') return zlib.zstdDecompressSync(buffer)
+  throw new Error('当前 Node 不支持 zstd')
+}
+
+/**
+ * 按 content-encoding 解压。微信 / 阿里系大量接口用 gzip / br，不解压拿到的是乱码。
+ *
+ * 三层保护，都是踩过的坑：
+ *   1. 多段编码（`gzip, br`）要按逆序逐层解；
+ *   2. deflate 有两种流派（带 zlib 头 / 裸 deflate），前者失败退后者；
+ *   3. **解不开就返回空串**，绝不回退成 utf8 乱码 —— 乱码会让上层 JSON 解析失败，
+ *      和空串的结果一样，但空串不会在诊断文件里伪装成「有响应体但字段名不对」。
+ */
+export function decodeBody(buffer, encoding) {
   if (!buffer || !buffer.length) return ''
-  const enc = String(encoding || '').toLowerCase()
+  const enc = String(encoding || '')
+    .trim()
+    .toLowerCase()
+  if (!enc || enc === 'identity') return buffer.toString('utf8')
+
+  const layers = enc
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .reverse()
+
   try {
     let out = buffer
-    if (enc.includes('br')) out = zlib.brotliDecompressSync(buffer)
-    else if (enc.includes('gzip')) out = zlib.gunzipSync(buffer)
-    else if (enc.includes('deflate')) out = zlib.inflateSync(buffer)
+    for (const layer of layers) {
+      if (layer.includes('br')) out = zlib.brotliDecompressSync(out)
+      else if (layer.includes('gzip')) out = zlib.gunzipSync(out)
+      else if (layer.includes('deflate')) {
+        try {
+          out = zlib.inflateSync(out)
+        } catch {
+          out = zlib.inflateRawSync(out)
+        }
+      } else if (layer.includes('zstd')) out = zstdDecompress(out)
+      else return '' // 不认识的算法：宁可空着，也不要把乱码混进取值
+    }
     return out.toString('utf8')
   } catch {
-    return buffer.toString('utf8')
+    return ''
   }
 }
