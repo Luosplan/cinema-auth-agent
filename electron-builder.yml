@@ -1,5 +1,5 @@
 appId: com.cinemaauth.agent
-productName: CinemaAuthAgent
+productName: HK票务助手
 directories:
   buildResources: build
 files:
@@ -11,9 +11,9 @@ files:
 asarUnpack:
   - resources/**
 win:
-  executableName: CinemaAuthAgent
+  executableName: HK票务助手
 nsis:
-  artifactName: ${name}-${version}-setup.${ext}
+  artifactName: ${productName}-${version}-setup.${ext}
   shortcutName: HK票务助手
   uninstallDisplayName: HK票务助手
   createDesktopShortcut: always
@@ -25,7 +25,7 @@ mac:
     - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
   notarize: false
 dmg:
-  artifactName: ${name}-${version}.${ext}
+  artifactName: ${productName}-${version}.${ext}
 linux:
   target:
     - AppImage
@@ -33,7 +33,7 @@ linux:
   maintainer: cinema-auth-agent
   category: Utility
 appImage:
-  artifactName: ${name}-${version}.${ext}
+  artifactName: ${productName}-${version}.${ext}
 npmRebuild: false
 publish:
   provider: generic
