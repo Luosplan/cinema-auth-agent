@@ -954,6 +954,17 @@ routers.push(
 )
 
 routers.push(
+  new EventRoute('rules:params', 'invoke', async () => {
+    // 各规则声明的凭证字段并集，抓包页据此标注参数
+    const keys = new Set(['authorization', 'token', 'cookie', 'openid', 'mobile'])
+    for (const rule of mergeRules()) {
+      for (const key of rule.params || []) keys.add(String(key).toLowerCase())
+    }
+    return [...keys]
+  })
+)
+
+routers.push(
   new EventRoute('logs:list', 'invoke', async (api) => api.ctx.logs.slice(-200))
 )
 

@@ -89,16 +89,6 @@ function isValid(acc) {
   return Number(acc?.tokenStatus) === 1
 }
 
-function countOf(cinema) {
-  return accountsMap.value[cinema.id]?.length || 0
-}
-
-function metaText(cinema) {
-  const n = countOf(cinema)
-  if (n) return `${n} 个账号`
-  return accountsLoading.value ? '读取中…' : '无账号'
-}
-
 /** 复制到剪贴板：file:// 下 navigator.clipboard 不可用，退回 textarea + execCommand */
 async function writeClipboard(text) {
   try {
@@ -733,9 +723,8 @@ onUnmounted(() => {
               <template v-for="cinema in filteredCinemas" :key="cinema.id">
                 <tr v-for="(acc, idx) in rowsOf(cinema)" :key="`${cinema.id}-${idx}`">
                   <td v-if="idx === 0" :rowspan="rowsOf(cinema).length" class="cinema-cell">
-                    <div class="cinema-name" :title="cinema.name">{{ cinema.name }}</div>
-                    <div class="cinema-meta">
-                      <span>{{ metaText(cinema) }}</span>
+                    <div class="cinema-line">
+                      <span class="cinema-name" :title="cinema.name">{{ cinema.name }}</span>
                       <button
                         class="copy-btn"
                         type="button"
@@ -1186,23 +1175,23 @@ tbody tr:hover td {
   background: #fafafb;
 }
 
+/* 影城名和复制图标一行显示：名称占满剩余宽度，图标统一贴右，各行上下对齐 */
+.cinema-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .cinema-name {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--tx);
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cinema-meta {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 2px;
-  font-size: 10.5px;
-  color: var(--tx-4);
   white-space: nowrap;
 }
 

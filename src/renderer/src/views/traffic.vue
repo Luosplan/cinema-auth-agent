@@ -1,5 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { invoke, on } from '@utils/ipc'
 import { proxyStatus } from '@renderer/stores/proxy'
 import { ui } from '@renderer/stores/ui'
@@ -26,13 +27,16 @@ const activeId = ref('')
 const activeTab = ref('overview')
 const detail = ref(null)
 const loadError = ref('')
+/** 各规则声明的凭证字段名（mobile / token / authorization / openid ...），从主进程取 */
+const credKeys = ref(['authorization', 'token', 'cookie', 'openid', 'mobile'])
 
 const TABS = [
   { key: 'overview', label: '概览' },
   { key: 'reqHeaders', label: '请求头' },
   { key: 'reqBody', label: '请求体' },
   { key: 'resHeaders', label: '响应头' },
-  { key: 'resBody', label: '响应体' }
+  { key: 'resBody', label: '响应体' },
+  { key: 'cred', label: '凭证参数' }
 ]
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
@@ -122,7 +126,8 @@ function pushRecords(list, full) {
 
 async function select(id) {
   activeId.value = id
-  activeTab.value = 'overview'
+  // 点开请求直接看凭证参数，省得再手动切页签
+  activeTab.value = 'cred'
   loadError.value = ''
   // 实时推送里本来就带完整报文，优先用本地缓存，点击立即出结果
   let record = cache.get(id)
@@ -190,10 +195,194 @@ function sizeText(text) {
   return `${(len / 1024).toFixed(1)} KB`
 }
 
+/**
+ * 抓包需要的参数名：token / TOKEN / Token 大小写都算，也兼容 accessToken 这类后缀写法；
+ * 手机号等登录必填字段的常见叫法一并收进来。
+ */
+const EXTRA_CRED_KEYS = [
+  'authorization',
+  'token',
+  'access_token',
+  'accesstoken',
+  'refresh_token',
+  'refreshtoken',
+  'cookie',
+  'session',
+  'sessionid',
+  'ticket',
+  'secret',
+  'password',
+  'passwd',
+  'openid',
+  'unionid',
+  'memberid',
+  'mobile',
+  'mobilephone',
+  'phone',
+  'tel',
+  'telephone',
+  'apikey',
+  'appkey',
+  'secretkey',
+  'x-token',
+  'third-session',
+  'sign',
+  'key',
+  'k'
+]
+
+/** 请求头只认这些明确带凭证的头，避免把 sec-ch-ua-mobile 这类客户端提示当成手机号 */
+const HEADER_CRED_NAMES = new Set([
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'set-cookie',
+  'token',
+  'x-token',
+  'x-access-token',
+  'access-token',
+  'auth-token',
+  'x-auth-token',
+  'third-session',
+  'session',
+  'sessionid',
+  'session-id',
+  'sid',
+  'sign',
+  'signature',
+  'x-sign',
+  'secret',
+  'apikey',
+  'api-key',
+  'appkey'
+])
+
+const credWords = computed(
+  () =>
+    new Set(
+      [...EXTRA_CRED_KEYS, ...credKeys.value]
+        .map((k) => String(k || '').trim().toLowerCase())
+        .filter(Boolean)
+    )
+)
+
+/** 字段名就是凭证名，或以后缀形式出现（accessToken、userMobile） */
+function isCredKey(key) {
+  const k = String(key || '').trim().toLowerCase()
+  if (!k) return false
+  for (const word of credWords.value) {
+    if (k === word) return true
+    if (word.length >= 4 && k.endsWith(word)) return true
+  }
+  return false
+}
+
+function isCredHeader(name) {
+  const n = String(name || '').trim().toLowerCase()
+  return HEADER_CRED_NAMES.has(n) || n.endsWith('-token') || n.endsWith('-session')
+}
+
+/** 请求体可能是 JSON 字符串、对象或 a=1&b=2 表单，尽量都拆开 */
+function parseBody(body) {
+  if (body == null || body === '') return null
+  if (typeof body === 'object') return body
+  const raw = String(body).trim()
+  if (!raw) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    if (!raw.includes('=') || raw.includes('<')) return null
+    const obj = {}
+    for (const pair of raw.split('&')) {
+      const [k, v = ''] = pair.split('=')
+      if (!k) continue
+      try {
+        obj[decodeURIComponent(k)] = decodeURIComponent(v)
+      } catch {
+        obj[k] = v
+      }
+    }
+    return obj
+  }
+}
+
+/** 递归找凭证字段，path 只用来提示位置，展示时只显示字段名 */
+function walkCred(body, depth, path, visit) {
+  if (body == null || depth > 6) return
+  if (Array.isArray(body)) {
+    body.slice(0, 30).forEach((item, i) => walkCred(item, depth + 1, `${path}[${i}]`, visit))
+    return
+  }
+  if (typeof body !== 'object') return
+  for (const [k, v] of Object.entries(body)) {
+    const next = path ? `${path}.${k}` : k
+    if (isCredKey(k) && (v == null || typeof v !== 'object')) visit(k, next, v)
+    walkCred(v, depth + 1, next, visit)
+  }
+}
+
+/** 明显不是有效凭证的值直接跳过：空值、0、false、null、短数字等 */
+function isUsefulCredValue(value) {
+  const text = String(value == null ? '' : value).trim()
+  if (!text) return false
+  const lower = text.toLowerCase()
+  if (['0', 'false', 'null', 'undefined', 'none', 'nil', 'nan', '-', '--', '[]', '{}'].includes(lower)) {
+    return false
+  }
+  // token: 0、token: 123 这种短数字肯定不是凭证；手机号是 11 位，不受影响
+  if (/^\d+$/.test(text) && text.length < 6) return false
+  return true
+}
+
+/** 抓包需要的参数汇总：把请求头、响应头、请求体、响应体里的凭证字段挑出来 */
+const credParams = computed(() => {
+  if (!detail.value) return []
+  const out = []
+  const seen = new Set()
+  const add = (source, key, path, value) => {
+    const text = value == null ? '' : String(value)
+    if (!isUsefulCredValue(text)) return
+    // 同一个参数在报文里出现多次（不同层级、请求/响应都有）时只保留一条
+    const id = `${key}|${text}`
+    if (seen.has(id)) return
+    seen.add(id)
+    out.push({ source, key, path: path || key, value: text })
+  }
+  const scanHeaders = (source, headers) => {
+    for (const [k, v] of Object.entries(headers || {})) {
+      if (isCredHeader(k)) add(source, k, k, Array.isArray(v) ? v.join('; ') : v)
+    }
+  }
+  scanHeaders('请求头', detail.value.reqHeaders)
+  scanHeaders('响应头', detail.value.resHeaders)
+  for (const [source, body] of [
+    ['请求体', detail.value.reqBody],
+    ['响应体', detail.value.resBody]
+  ]) {
+    const parsed = parseBody(body)
+    if (parsed) walkCred(parsed, 0, '', (key, path, value) => add(source, key, path, value))
+  }
+  return out
+})
+
+async function copyCred(value) {
+  try {
+    await navigator.clipboard.writeText(String(value || ''))
+    ElMessage.success('已复制')
+  } catch {
+    ElMessage.warning('复制失败，请手动选中复制')
+  }
+}
+
 let offCapture = null
 
 onMounted(async () => {
   await loadFilterPref()
+  invoke('rules:params')
+    .then((keys) => {
+      if (Array.isArray(keys) && keys.length) credKeys.value = keys
+    })
+    .catch(() => {})
   const list = await invoke('captures:list', { limit: MAX_ROWS }).catch(() => [])
   pushRecords(list, false)
   offCapture = on('capture-batch', (batch) => pushRecords(batch, true))
@@ -261,7 +450,7 @@ onUnmounted(() => {
 
           <div v-if="!filtered.length" class="empty">
             <template v-if="!proxyStatus.running">
-              采集未开启。点右上角「开始采集」后，在浏览器或微信里操作目标页面，请求会实时出现在这里。
+              采集未开启。点标题栏的采集开关后，在浏览器或微信里操作目标页面，请求会实时出现在这里。
             </template>
             <template v-else-if="rows.length">
               <template v-if="hiddenCount && !keyword.trim() && methodFilter === 'ALL'">
@@ -343,6 +532,22 @@ onUnmounted(() => {
                 >
                   <span class="hk mono">{{ k }}</span>
                   <span class="hv mono">{{ v }}</span>
+                </div>
+              </div>
+            </template>
+
+            <template v-else-if="activeTab === 'cred'">
+              <div v-if="!credParams.length" class="empty">
+                这条报文里没有发现凭证相关参数（token、authorization、cookie、mobile 等）。
+              </div>
+              <div v-else class="creds">
+                <div v-for="(p, i) in credParams" :key="i" class="cred-row">
+                  <span class="cred-src">{{ p.source }}</span>
+                  <span class="cred-key mono" :title="p.path !== p.key ? p.path : ''">
+                    {{ p.key }}
+                  </span>
+                  <span class="cred-val mono" :title="p.value">{{ p.value }}</span>
+                  <button class="cred-copy" @click="copyCred(p.value)">复制</button>
                 </div>
               </div>
             </template>
@@ -637,6 +842,60 @@ onUnmounted(() => {
 .hk {
   color: var(--tx-2);
   word-break: break-all;
+}
+
+/* ---- 凭证参数 tab ---- */
+.creds {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.cred-row {
+  display: grid;
+  grid-template-columns: 52px minmax(110px, 0.7fr) minmax(0, 1.6fr) 44px;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 11.5px;
+}
+
+.cred-row:last-child {
+  border-bottom: none;
+}
+
+.cred-src {
+  color: var(--tx-4);
+}
+
+.cred-key {
+  color: var(--warn);
+  word-break: break-all;
+}
+
+.cred-val {
+  color: var(--tx-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.cred-copy {
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--tx-3);
+  cursor: pointer;
+}
+
+.cred-copy:hover {
+  color: var(--tx);
 }
 
 .hv {
