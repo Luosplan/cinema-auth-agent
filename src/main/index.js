@@ -31,6 +31,7 @@ import ConfigStore from './store/ConfigStore'
 import CredentialStore from './store/CredentialStore'
 import Reporter from './reporter/Reporter'
 import MemberAuth from './auth/MemberAuth'
+import Updater from './updater/Updater'
 
 const APP_TITLE = '一票通-采集助手'
 const MAX_CAPTURES = 300
@@ -1098,6 +1099,18 @@ app.whenReady().then(async () => {
   ctx.updateTrayMenu = updateTrayMenu
   ctx.recoverStaleProxy = recoverStaleProxy
 
+  // 检测到新版本只在标题栏显示更新入口，用户确认后才下载
+  ctx.updater = new Updater({
+    onEvent: (type, payload) => {
+      broadcast('updater-event', { type, ...payload })
+      if (type === 'available') log('info', `发现新版本 ${payload.version}`)
+      else if (type === 'downloaded') log('info', '新版本已下载，即将重启安装')
+      else if (type === 'error') log('warn', `更新失败：${payload.message}`)
+    },
+    // 安装前停采集并还原系统代理，避免重启后代理仍指向已退出的进程
+    beforeInstall: shutdown
+  })
+
   await recoverStaleProxy()
 
   app.on('browser-window-created', (_, window) => {
@@ -1114,6 +1127,9 @@ app.whenReady().then(async () => {
       log('error', `自动启动采集失败：${e.message}`)
     }
   }
+
+  // 启动后静默检查更新，不自动下载
+  ctx.updater.check()
 
   // 上报失败队列定时补发
   setInterval(() => {

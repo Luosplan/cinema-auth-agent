@@ -494,9 +494,7 @@ async function captureParams() {
       // 页面已经由 webview 打开，这里只抓不打开
       launch: false,
       // 主进程也会自己找内嵌页；小程序模式根本没有内嵌页，传 0 免得串到上一家的页面
-      webContentsId: paramMode.value === 'h5' ? paramWebContentsId || 0 : 0,
-      // 登录要输账号、等验证码，给两分钟；小程序还得先去微信里搜出小程序，多给一分钟
-      waitMs: paramMode.value === 'miniapp' ? 180000 : 120000
+      webContentsId: paramMode.value === 'h5' ? paramWebContentsId || 0 : 0
     })
     if (!res?.ok) {
       ElMessage.error(res?.message || '获取失败')
@@ -811,7 +809,7 @@ onUnmounted(() => {
     <el-dialog
       v-model="paramDialog"
       :title="dialogCinema ? `影城参数 · ${dialogCinema.name}` : '影城参数'"
-      :width="paramMode === 'miniapp' ? '620px' : '980px'"
+      :width="paramMode === 'miniapp' ? '520px' : '860px'"
       :close-on-click-modal="false"
       align-center
       class="param-dialog"
@@ -819,7 +817,7 @@ onUnmounted(() => {
       <div v-if="dialogCinema" class="dlg p-split">
         <div class="p-left">
           <div class="p-entry">
-            <span class="p-entry-k">入口</span>
+            <span class="p-entry-k">影城链接：</span>
             <span class="p-entry-v mono" :class="{ dim: !dialogEntry.ok }" :title="dialogEntry.text">
               {{ dialogEntry.text }}
             </span>
@@ -901,25 +899,27 @@ onUnmounted(() => {
             allowpopups
           />
           <div v-else class="p-web-empty">
-            点「获取参数」后，这里会打开这家影城的入口页面
+            点「获取参数」，登录影城获取参数
           </div>
           <div v-if="paramPageError" class="p-web-err">{{ paramPageError }}</div>
         </div>
       </div>
 
       <template #footer>
-        <el-button size="small" @click="paramDialog = false">取消</el-button>
-        <el-button v-if="capturing" size="small" @click="stopCapture">停止</el-button>
-        <el-button
-          size="small"
-          type="primary"
-          :loading="capturing"
-          :disabled="!canCapture"
-          :title="canCapture ? '' : '后台没有配置入口链接或小程序 appId'"
-          @click="captureParams"
-        >
-          {{ capturing ? `采集中 ${capturedCount}` : '获取参数' }}
-        </el-button>
+        <div class="btn-group">
+          <el-button size="small" @click="paramDialog = false">取消</el-button>
+          <el-button v-if="capturing" size="small" @click="stopCapture">停止</el-button>
+          <el-button
+            size="small"
+            type="primary"
+            :loading="capturing"
+            :disabled="!canCapture"
+            :title="canCapture ? '' : '后台没有配置入口链接或小程序 appId'"
+            @click="captureParams"
+          >
+            {{ capturing ? `采集中 ${capturedCount}` : '获取参数' }}
+          </el-button>
+        </div>
       </template>
     </el-dialog>
 
@@ -1071,7 +1071,7 @@ onUnmounted(() => {
 
 /* 标题行右侧的系统数量，口径要跟下面每一行的影城数一致，所以不加粗 */
 .systems-title .sys-count {
-  font-weight: 400;
+  font-weight: 340;
   letter-spacing: 0;
 }
 
@@ -1338,7 +1338,7 @@ tbody tr:hover td {
 .p-web {
   display: flex;
   width: 340px;
-  height: 560px;
+  height: 520px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: #fff;
@@ -1349,7 +1349,7 @@ tbody tr:hover td {
   align-items: center;
   justify-content: center;
   width: 340px;
-  height: 560px;
+  height: 520px;
   padding: 0 28px;
   border: 1px dashed var(--line-strong);
   border-radius: 6px;
@@ -1364,6 +1364,12 @@ tbody tr:hover td {
   margin-top: 6px;
   color: var(--err);
   font-size: 11px;
+}
+
+.btn-group {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 /* 拉起失败：微信不会报错，这条是操作员唯一的线索，得让它显眼一点 */

@@ -627,8 +627,9 @@ routers.push(
         ? keys.filter((key) => declared.has(normalizeKey(key)))
         : keys
 
-    // 登录要时间：默认给 2 分钟，最长 5 分钟；窗口被关掉立刻收工
-    const waitMs = Math.min(Math.max(Number(params.waitMs) || 120000, 5000), 300000)
+    // 设置 → 通用 → 获取参数等待时长；抓齐会提前收工，窗口被关掉也会立刻收工
+    const waitSec = Math.min(Math.max(Number(ctx.config?.get('app.captureWaitSec')) || 120, 5), 600)
+    const waitMs = waitSec * 1000
     const deadline = Date.now() + waitMs
     const startedAt = Date.now()
     const h5 = Boolean(launch && launch.ok && launch.mode === 'h5')
@@ -1046,6 +1047,34 @@ routers.push(
     await exec(process.platform === 'win32' ? 'explorer' : 'open', [api.ctx.dataDir]).catch(
       () => {}
     )
+    return { ok: true }
+  })
+)
+
+routers.push(
+  new EventRoute('updater:status', 'invoke', async (api) => {
+    return api.ctx.updater ? api.ctx.updater.status() : { enabled: false }
+  })
+)
+
+routers.push(
+  new EventRoute('updater:check', 'invoke', async (api) => {
+    if (!api.ctx.updater) return { ok: false, message: '更新模块不可用' }
+    return api.ctx.updater.check()
+  })
+)
+
+routers.push(
+  new EventRoute('updater:download', 'invoke', async (api) => {
+    if (!api.ctx.updater) return { ok: false, message: '更新模块不可用' }
+    return api.ctx.updater.download()
+  })
+)
+
+routers.push(
+  new EventRoute('updater:quit-and-install', 'invoke', async (api) => {
+    if (!api.ctx.updater) return { ok: false, message: '更新模块不可用' }
+    api.ctx.updater.quitAndInstall()
     return { ok: true }
   })
 )

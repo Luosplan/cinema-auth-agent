@@ -8,6 +8,12 @@ files:
   - '!electron.vite.config.{js,ts,mjs,cjs}'
   - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md,read.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+  - '!release{,/**/*}'
+  - '!docs{,/**/*}'
+  - '!.tmp{,/**/*}'
+  - '!.temp{,/**/*}'
+  - '!.buildcheck{,/**/*}'
+  - '!*.log'
 asarUnpack:
   - resources/**
 win:
@@ -37,6 +43,7 @@ appImage:
 npmRebuild: false
 publish:
   provider: generic
-  url: https://example.com/auto-updates
+  # 预留的一票通更新地址；192.0.2.1 为文档保留 IP，部署时替换为实际服务器
+  url: http://192.0.2.1/updates/
 electronDownload:
   mirror: https://npmmirror.com/mirrors/electron/

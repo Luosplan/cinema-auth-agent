@@ -30,7 +30,12 @@ const NAV = [
   {
     group: '设置',
     items: [
-      { key: 'general', label: '通用', icon: 'sliders', keywords: '端口 自启 托盘 启动 采集' },
+      {
+        key: 'general',
+        label: '通用',
+        icon: 'sliders',
+        keywords: '端口 自启 托盘 启动 采集 参数 等待 时长'
+      },
       { key: 'account', label: '账号', icon: 'user', keywords: '会员 登录 退出 手机号' }
     ]
   },
@@ -73,7 +78,7 @@ const filteredNav = computed(() => {
 
 // ---- 配置项 ----
 const reporter = reactive({ enabled: false, url: '', token: '', minIntervalSec: 30 })
-const appCfg = reactive({ autoLaunch: false, minimizeToTray: true })
+const appCfg = reactive({ autoLaunch: false, minimizeToTray: true, captureWaitSec: 120 })
 const proxyCfg = reactive({ port: 9090, autoStart: false })
 const appInfo = reactive({ version: '', platform: '', agentId: '', dataDir: '' })
 
@@ -249,6 +254,13 @@ async function saveProxy() {
     }
   })
   ElMessage.success('已保存，下次启动采集时生效')
+}
+
+async function saveCaptureWait() {
+  await invoke('config:update', {
+    app: { captureWaitSec: Number(appCfg.captureWaitSec) || 120 }
+  })
+  ElMessage.success('获取参数等待时长已保存')
 }
 
 async function installCa() {
@@ -444,6 +456,22 @@ onUnmounted(() => {
                 :max="65535"
                 :controls="false"
                 @change="saveProxy"
+              />
+            </div>
+
+            <div class="row">
+              <div class="row-main">
+                <div class="row-title">获取参数等待时长</div>
+                <div class="row-desc">单位秒，默认 120，可设置 5～600；抓齐参数会提前自动停止</div>
+              </div>
+              <el-input-number
+                v-model="appCfg.captureWaitSec"
+                class="ctl-num"
+                size="small"
+                :min="5"
+                :max="600"
+                :controls="false"
+                @change="saveCaptureWait"
               />
             </div>
           </div>
