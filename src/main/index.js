@@ -27,6 +27,7 @@ import ConfigStore from './store/ConfigStore'
 import CredentialStore from './store/CredentialStore'
 import Reporter from './reporter/Reporter'
 import MemberAuth from './auth/MemberAuth'
+import Updater from './updater/Updater'
 
 const APP_TITLE = 'HK票务助手'
 const MAX_CAPTURES = 300
@@ -34,6 +35,9 @@ const MAX_LOGS = 500
 
 let mainWindow = null
 let tray = null
+// 托盘菜单必须模块级持有：setContextMenu 后 Electron 对 Menu 是弱引用，
+// 打包后 GC 一旦回收掉这个 menu，菜单还能弹出、但点击回调全丢（表现为点了没反应）。
+let trayMenu = null
 let quitting = false
 let shutdownPending = false
 let shutdownDone = false
@@ -189,7 +193,7 @@ function createTray() {
 
 function updateTrayMenu() {
   if (!tray) return
-  const menu = Menu.buildFromTemplate([
+  trayMenu = Menu.buildFromTemplate([
     {
       label: ctx.proxyRunning ? '采集中（点击停止）' : '已停止（点击开始）',
       click: async () => {
@@ -220,7 +224,7 @@ function updateTrayMenu() {
       }
     }
   ])
-  tray.setContextMenu(menu)
+  tray.setContextMenu(trayMenu)
 }
 
 async function startProxy() {
@@ -272,9 +276,16 @@ async function startProxy() {
    *
    * 必须把它设为上游：用户开着 VPN 才能上网，我们把系统代理改成 9090 之后，
    * 如果还直连出网，用户立刻断网；只有「我们解密 → 其余原样转给它」两者才能共存。
+   *
+   * 但只有 ProxyEnable 确实等于 1 时，ProxyServer 里的地址才是「正在用的出网通道」。
+   * 用户关掉 VPN 时，Clash 只把 ProxyEnable 置 0，注册表里往往还残留着
+   * 127.0.0.1:7897 这串地址 —— 照旧解析成上游，等于把全部流量转给一个已经
+   * 没人监听的端口，浏览器瞬间全断网。所以 ProxyEnable 为 0 时一律当「没有上游」直连。
+   *
    * 端口撞上自己就置空，否则会形成回环。
    */
-  const previous = parseProxyServer(before.proxyServer)
+  const proxyWasOn = Number(before.proxyEnable) === 1
+  const previous = proxyWasOn ? parseProxyServer(before.proxyServer) : null
   const isSelf =
     previous &&
     (previous.host === '127.0.0.1' || previous.host === 'localhost') &&
@@ -593,6 +604,25 @@ app.whenReady().then(async () => {
   ctx.updateTrayMenu = updateTrayMenu
   ctx.recoverStaleProxy = recoverStaleProxy
 
+  // 自动更新：检测到新版本只在界面亮「立即更新」，不自动下载
+  ctx.updater = new Updater({
+    onEvent: (type, payload) => {
+      broadcast('updater-event', { type, ...payload })
+      if (type === 'available') log('info', `发现新版本 ${payload.version}`)
+      else if (type === 'downloaded') log('info', '新版本已下载，即将重启安装')
+      else if (type === 'error') log('warn', `更新失败：${payload.message}`)
+    },
+    // 重启安装前先停采集、还原系统代理，避免退出后把客户机留在「代理指向死端口」
+    beforeInstall: async () => {
+      if (ctx.proxyRunning) {
+        ctx.proxyRunning = false
+        await ctx.systemProxy.disable().catch(() => {})
+        await ctx.proxy.stop().catch(() => {})
+      }
+      clearLock()
+    }
+  })
+
   await recoverStaleProxy()
 
   app.on('browser-window-created', (_, window) => {
@@ -609,6 +639,9 @@ app.whenReady().then(async () => {
       log('error', `自动启动采集失败：${e.message}`)
     }
   }
+
+  // 启动后静默检查更新；发现新版本只在界面亮「立即更新」，不自动下载
+  ctx.updater.check()
 
   // 上报失败队列定时补发
   setInterval(() => {

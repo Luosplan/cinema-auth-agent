@@ -8,16 +8,28 @@ files:
   - '!electron.vite.config.{js,ts,mjs,cjs}'
   - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md,read.md}'
   - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+  - '!release{,/**/*}'
+  - '!docs{,/**/*}'
+  - '!.tmp{,/**/*}'
+  - '!.temp{,/**/*}'
+  - '!.buildcheck{,/**/*}'
+  - '!*.log'
 asarUnpack:
   - resources/**
+electronLanguages:
+  - en-US
+  - zh-CN
 win:
   executableName: HK票务助手
 nsis:
-  artifactName: ${productName}-${version}-setup.${ext}
+  artifactName: ${productName}.${ext}
   shortcutName: HK票务助手
   uninstallDisplayName: HK票务助手
   createDesktopShortcut: always
+  oneClick: false
   perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
 mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
@@ -37,6 +49,6 @@ appImage:
 npmRebuild: false
 publish:
   provider: generic
-  url: https://example.com/auto-updates
+  url: https://203.195.196.67/updates/
 electronDownload:
   mirror: https://npmmirror.com/mirrors/electron/

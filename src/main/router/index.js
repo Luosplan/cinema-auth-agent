@@ -498,7 +498,12 @@ routers.push(
 
       scanNew()
       const startedAt = Date.now()
-      const waitMs = Math.min(Math.max(Number(params.waitMs) || 20000, 3000), 60000)
+      // 等待时长从配置读（设置 → 通用 → 采集时长），默认 120 秒（2 分钟），范围 5~600 秒
+      const waitSec = Math.min(
+        Math.max(Number(ctx.config?.get('app.captureWaitSec')) || 120, 5),
+        600
+      )
+      const waitMs = waitSec * 1000
       const deadline = startedAt + waitMs
       let stopped = false
       /**
@@ -578,7 +583,8 @@ routers.push(
              * 外网全断，用户只会以为「开了抓包就上不了网」。
              */
             if (!ctx.proxy.upstream) {
-              const adopted = parseProxyServer(now.actual)
+              // 只有「确实开着」的代理地址才是活的上游，残留的 ProxyServer 不能接
+              const adopted = now.enabled ? parseProxyServer(now.actual) : null
               const isSelf = adopted && adopted.port === port && adopted.host === '127.0.0.1'
               if (adopted && !isSelf) {
                 ctx.proxy.setUpstream(adopted)
@@ -1176,6 +1182,34 @@ routers.push(
     await exec(process.platform === 'win32' ? 'explorer' : 'open', [api.ctx.dataDir]).catch(
       () => {}
     )
+    return { ok: true }
+  })
+)
+
+routers.push(
+  new EventRoute('updater:status', 'invoke', async (api) => {
+    return api.ctx.updater ? api.ctx.updater.status() : { enabled: false }
+  })
+)
+
+routers.push(
+  new EventRoute('updater:check', 'invoke', async (api) => {
+    if (!api.ctx.updater) return { ok: false, message: '更新模块不可用' }
+    return api.ctx.updater.check()
+  })
+)
+
+routers.push(
+  new EventRoute('updater:download', 'invoke', async (api) => {
+    if (!api.ctx.updater) return { ok: false, message: '更新模块不可用' }
+    return api.ctx.updater.download()
+  })
+)
+
+routers.push(
+  new EventRoute('updater:quit-and-install', 'invoke', async (api) => {
+    if (!api.ctx.updater) return { ok: false, message: '更新模块不可用' }
+    api.ctx.updater.quitAndInstall()
     return { ok: true }
   })
 )

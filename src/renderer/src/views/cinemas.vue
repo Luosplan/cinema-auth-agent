@@ -362,9 +362,7 @@ async function captureParams() {
        * 传下去只会让主进程「抓不到手机号时用账号填」，表格里就显示成另一个号了。
        * 手机号本身在 getaccountid / getsidbytid 的响应体里，刷新页面就能抓到。
        */
-      systemCode: paramAccounts.value[0]?.info?.system || cinema.systemCode || '',
-      // 45 秒：够切到浏览器刷新一次、再把手机号登录走完
-      waitMs: 45000
+      systemCode: paramAccounts.value[0]?.info?.system || cinema.systemCode || ''
     })
     if (!res?.ok) {
       ElMessage.error(res?.message || '获取失败')

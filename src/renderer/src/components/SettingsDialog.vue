@@ -83,7 +83,7 @@ const roleText = computed(() => {
 
 // ---- 配置项 ----
 const reporter = reactive({ enabled: false, url: '', token: '', minIntervalSec: 30 })
-const appCfg = reactive({ autoLaunch: false, minimizeToTray: true })
+const appCfg = reactive({ autoLaunch: false, minimizeToTray: true, captureWaitSec: 120 })
 const proxyCfg = reactive({ port: 9090, autoStart: false })
 const appInfo = reactive({ version: '', platform: '', agentId: '', dataDir: '' })
 
@@ -259,6 +259,13 @@ async function saveProxy() {
     }
   })
   ElMessage.success('已保存，下次启动采集时生效')
+}
+
+async function saveCaptureWait() {
+  await invoke('config:update', {
+    app: { captureWaitSec: Number(appCfg.captureWaitSec) || 120 }
+  })
+  ElMessage.success('采集时长已保存')
 }
 
 async function installCa() {
@@ -454,6 +461,22 @@ onUnmounted(() => {
                 :max="65535"
                 :controls="false"
                 @change="saveProxy"
+              />
+            </div>
+
+            <div class="row">
+              <div class="row-main">
+                <div class="row-title">获取参数等待时长</div>
+                <div class="row-desc">单位秒，默认 120（2 分钟）。抓到参数会提前自动停止，不受这个上限影响</div>
+              </div>
+              <el-input-number
+                v-model="appCfg.captureWaitSec"
+                class="ctl-num"
+                size="small"
+                :min="5"
+                :max="600"
+                :controls="false"
+                @change="saveCaptureWait"
               />
             </div>
           </div>

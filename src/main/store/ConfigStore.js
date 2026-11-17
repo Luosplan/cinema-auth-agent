@@ -15,7 +15,8 @@ const DEFAULT_CONFIG = {
   app: {
     autoLaunch: false,
     minimizeToTray: true,
-    captureLimit: 300
+    captureLimit: 300,
+    captureWaitSec: 120
   },
   rules: {}
 }

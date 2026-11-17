@@ -6,6 +6,12 @@ import { auth, avatarText, displayName, loadAuth, logout } from '@renderer/store
 import { proxyStatus, toggleProxy } from '@renderer/stores/proxy'
 import { caInfo, installCa as installCaCert, refreshCa } from '@renderer/stores/ca'
 import { openSettings } from '@renderer/stores/ui'
+import {
+  updaterStatus,
+  startUpdaterListen,
+  stopUpdaterListen,
+  downloadUpdate
+} from '@renderer/stores/updater'
 import LoginDialog from '@renderer/components/LoginDialog.vue'
 import SettingsDialog from '@renderer/components/SettingsDialog.vue'
 
@@ -30,6 +36,20 @@ const toggleTitle = computed(() => {
   if (proxyStatus.running) return '停止采集'
   return caInfo.installed ? '开始采集' : '开始采集（需先安装根证书）'
 })
+
+/** 更新按钮文案：待下载 / 下载进度 / 下载完成即将重启三态 */
+const updateLabel = computed(() => {
+  if (updaterStatus.downloading) return `下载中 ${Math.floor(updaterStatus.progress)}%`
+  if (updaterStatus.downloaded) return '即将重启'
+  return '立即更新'
+})
+
+/** 点「立即更新」触发下载；下载完成后主进程会自动重启安装，这里不用再管 */
+async function onDownloadUpdate() {
+  if (updaterStatus.downloading || updaterStatus.downloaded) return
+  const res = await downloadUpdate()
+  if (res && !res.ok) ElMessage.error(res.message || '下载失败，请稍后重试')
+}
 
 let offWindowState = null
 
@@ -160,6 +180,7 @@ function onDocClick(e) {
 
 onMounted(async () => {
   loadAuth()
+  startUpdaterListen()
   const res = await invoke('window:state').catch(() => null)
   maximized.value = Boolean(res?.maximized)
   offWindowState = on('window-state', (payload) => {
@@ -170,6 +191,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (offWindowState) offWindowState()
+  stopUpdaterListen()
   document.removeEventListener('click', onDocClick)
 })
 </script>
@@ -181,6 +203,25 @@ onUnmounted(() => {
       <span class="logo" aria-hidden="true">HK</span>
       <span class="app-name">HK票务助手</span>
     </div>
+
+    <!-- 检测到新版本时在标题栏左侧亮更新入口 -->
+    <button
+      v-if="updaterStatus.available"
+      class="update-btn"
+      :class="{ busy: updaterStatus.downloading }"
+      :disabled="updaterStatus.downloading"
+      :title="
+        updaterStatus.downloading
+          ? `正在下载 v${updaterStatus.version}`
+          : `发现新版本 v${updaterStatus.version}，点击更新`
+      "
+      @click="onDownloadUpdate"
+    >
+      <svg viewBox="0 0 24 24">
+        <path d="M12 3v10m0 0l-5-5m5 5l5-5M4 19h16" />
+      </svg>
+      {{ updateLabel }}
+    </button>
 
     <div class="actions">
       <!-- 采集开关：图标表示下一步做什么，采集中是暂停，已停止是播放 -->
@@ -324,6 +365,44 @@ onUnmounted(() => {
   letter-spacing: -0.01em;
   color: var(--tx);
   white-space: nowrap;
+}
+
+/* ---- 更新入口 ---- */
+.update-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 7px;
+  background: var(--accent);
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.update-btn:hover {
+  background: var(--accent-hover);
+}
+
+.update-btn.busy {
+  opacity: 0.75;
+  cursor: default;
+}
+
+.update-btn svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.9;
 }
 
 /* ---- 右侧 ---- */
