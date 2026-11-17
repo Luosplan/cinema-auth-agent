@@ -14,7 +14,6 @@ import {
 import { ui } from '@renderer/stores/ui'
 import LoginDialog from './LoginDialog.vue'
 import SettingsIcon from './SettingsIcon.vue'
-import RulesPanel from './RulesPanel.vue'
 
 /**
  * 设置弹窗。
@@ -39,7 +38,6 @@ const NAV = [
     group: '功能',
     items: [
       { key: 'status', label: '运行状态', icon: 'pulse', keywords: '采集 解密 直通 代理 指标' },
-      { key: 'rules', label: '抓包规则', icon: 'route', keywords: '域名 解密 直通 白名单 host' },
       { key: 'credentials', label: '凭证库', icon: 'card', keywords: 'token 复制 有效期 清除' },
       { key: 'reporter', label: '凭证上报', icon: 'upload', keywords: '云端 地址 密钥 间隔' },
       { key: 'logs', label: '运行日志', icon: 'list', keywords: '请求 抓包 记录 报错' }
@@ -578,11 +576,6 @@ onUnmounted(() => {
               <el-button size="small" type="primary" @click="goto('ca')">去安装</el-button>
             </div>
           </div>
-        </template>
-
-        <!-- ========== 抓包规则 ========== -->
-        <template v-else-if="active === 'rules'">
-          <RulesPanel />
         </template>
 
         <!-- ========== 凭证库 ========== -->

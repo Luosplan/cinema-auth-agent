@@ -8,7 +8,7 @@ import { reactive } from 'vue'
  */
 export const ui = reactive({
   settingsOpen: false,
-  /** 打开时落在哪一栏：general / account / status / credentials / reporter / rules / logs / ca / about */
+  /** 打开时落在哪一栏：general / account / status / credentials / reporter / logs / ca / about */
   settingsSection: 'general'
 })
 

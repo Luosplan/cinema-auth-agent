@@ -54,13 +54,6 @@ defineProps({
       <path d="m9.2 12 2.1 2.1 3.9-4" />
     </template>
 
-    <!-- 抓包规则：一条从起点绕到终点的路径 -->
-    <template v-else-if="name === 'route'">
-      <circle cx="5.6" cy="6.2" r="2.2" />
-      <circle cx="18.4" cy="17.8" r="2.2" />
-      <path d="M7.8 6.2h4.6a3 3 0 0 1 0 6h-3.2a3 3 0 0 0 0 6h6.8" />
-    </template>
-
     <!-- 关于 -->
     <template v-else-if="name === 'info'">
       <circle cx="12" cy="12" r="8.4" />
