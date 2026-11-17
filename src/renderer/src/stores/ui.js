@@ -11,7 +11,7 @@ export const ui = reactive({
   /** 打开时落在哪一栏：general / account / status / credentials / reporter / logs / ca / about */
   settingsSection: 'general',
   /**
-   * 主视图：cinemas 影城账号 / platform 接单平台账号。
+   * 主视图：cinemas 影城账号 / traffic 网络抓包。
    * 用 v-show 切而不是卸载页面，切回来时筛选条件、选中的出票系统都还在。
    */
   mode: 'cinemas'
@@ -27,7 +27,7 @@ export function openSettings(section) {
   ui.settingsOpen = true
 }
 
-/** 影城账号 ↔ 接单平台账号 */
+/** 影城账号 ↔ 网络抓包 */
 export function toggleMode() {
-  ui.mode = ui.mode === 'cinemas' ? 'platform' : 'cinemas'
+  ui.mode = ui.mode === 'cinemas' ? 'traffic' : 'cinemas'
 }

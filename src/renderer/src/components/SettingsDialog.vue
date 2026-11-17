@@ -78,7 +78,12 @@ const filteredNav = computed(() => {
 
 // ---- 配置项 ----
 const reporter = reactive({ enabled: false, url: '', token: '', minIntervalSec: 30 })
-const appCfg = reactive({ autoLaunch: false, minimizeToTray: true, captureWaitSec: 120 })
+const appCfg = reactive({
+  autoLaunch: false,
+  minimizeToTray: true,
+  captureWaitSec: 120,
+  filterNoise: true
+})
 const proxyCfg = reactive({ port: 9090, autoStart: false })
 const appInfo = reactive({ version: '', platform: '', agentId: '', dataDir: '' })
 
@@ -261,6 +266,11 @@ async function saveCaptureWait() {
     app: { captureWaitSec: Number(appCfg.captureWaitSec) || 120 }
   })
   ElMessage.success('获取参数等待时长已保存')
+}
+
+async function saveNoiseFilter() {
+  await invoke('config:update', { app: { filterNoise: Boolean(appCfg.filterNoise) } })
+  ElMessage.success(appCfg.filterNoise ? '已开启静态资源过滤' : '已关闭静态资源过滤')
 }
 
 async function installCa() {
@@ -473,6 +483,14 @@ onUnmounted(() => {
                 :controls="false"
                 @change="saveCaptureWait"
               />
+            </div>
+
+            <div class="row">
+              <div class="row-main">
+                <div class="row-title">过滤静态资源</div>
+                <div class="row-desc">抓包页隐藏图片、脚本、样式和预检请求，只留接口调用；默认开启</div>
+              </div>
+              <el-switch v-model="appCfg.filterNoise" @change="saveNoiseFilter" />
             </div>
           </div>
         </template>

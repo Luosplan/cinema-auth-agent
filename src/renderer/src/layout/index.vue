@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted } from 'vue'
 import TitleBar from './components/TitleBar/index.vue'
 import StatusBar from './components/StatusBar/index.vue'
+import Traffic from '../views/traffic.vue'
 import { startProxyPoll, stopProxyPoll } from '../stores/proxy'
 import { ui } from '../stores/ui'
 
@@ -25,17 +26,8 @@ onUnmounted(() => stopProxyPoll())
       -->
       <router-view v-show="ui.mode === 'cinemas'" />
 
-      <!-- 占位：接单平台账号列表还没做，先让切换按钮点下去有落点 -->
-      <div v-show="ui.mode === 'platform'" class="page">
-        <div class="page-inner">
-          <div class="page-head">
-            <div>
-              <h1 class="page-title">接单平台账号</h1>
-              <p class="page-desc">这一栏还没接，先把入口留出来，列表后面补。</p>
-            </div>
-          </div>
-        </div>
-      </div>
+      <!-- 网络抓包：和 Reqable 一样左边请求列表、右边报文详情 -->
+      <Traffic v-show="ui.mode === 'traffic'" />
     </main>
     <StatusBar />
   </div>

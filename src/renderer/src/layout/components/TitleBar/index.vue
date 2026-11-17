@@ -247,17 +247,17 @@ onUnmounted(() => {
         </svg>
       </button>
 
-      <!-- 视图切换：影城账号 ↔ 接单平台账号 -->
+      <!-- 视图切换：影城账号 ↔ 网络抓包 -->
       <button
         class="icon-btn"
-        :class="{ active: ui.mode === 'platform' }"
-        :title="ui.mode === 'platform' ? '切回影城账号' : '接单平台账号'"
-        :aria-label="ui.mode === 'platform' ? '切回影城账号' : '接单平台账号'"
+        :class="{ active: ui.mode === 'traffic' }"
+        :title="ui.mode === 'traffic' ? '切回影城账号' : '网络抓包'"
+        :aria-label="ui.mode === 'traffic' ? '切回影城账号' : '网络抓包'"
         @click="toggleMode"
       >
         <svg viewBox="0 0 24 24">
-          <path d="M4.4 9.2h12M14.2 6.6l2.6 2.6-2.6 2.6" />
-          <path d="M19.6 14.8h-12M9.8 12.2 7.2 14.8l2.6 2.6" />
+          <rect x="3.6" y="4.6" width="16.8" height="14.8" rx="2.2" />
+          <path d="M3.6 8.6h16.8M7.2 12.2h9.6M7.2 15.6h6" />
         </svg>
       </button>
 
@@ -454,7 +454,7 @@ onUnmounted(() => {
   stroke: var(--tx);
 }
 
-/* 当前停在接单平台视图：底色沉一档，和悬停区分开 */
+/* 当前停在网络抓包视图：底色沉一档，和悬停区分开 */
 .icon-btn.active {
   background: var(--bg-active);
 }

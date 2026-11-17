@@ -16,7 +16,8 @@ const DEFAULT_CONFIG = {
     autoLaunch: false,
     minimizeToTray: true,
     captureLimit: 300,
-    captureWaitSec: 120
+    captureWaitSec: 120,
+    filterNoise: true
   },
   rules: {}
 }

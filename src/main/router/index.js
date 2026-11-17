@@ -965,16 +965,33 @@ routers.push(
 )
 
 routers.push(
-  new EventRoute('captures:list', 'invoke', async (api) => {
-    return api.ctx.captures.slice(-100).map((c) => ({
+  new EventRoute('captures:list', 'invoke', async (api, data) => {
+    const limit = Math.min(Math.max(Number(data?.params?.limit) || 100, 1), 300)
+    return api.ctx.captures.slice(-limit).map((c) => ({
       id: c.id,
       at: c.at,
       host: c.host,
       method: c.method,
       path: c.path,
       statusCode: c.statusCode,
-      duration: c.duration
+      duration: c.duration,
+      // 抓包页据此过滤静态资源/图片，响应头里的大小写不统一，这里统一转小写取
+      contentType:
+        String(
+          Object.entries(c.resHeaders || {}).find(([k]) => k.toLowerCase() === 'content-type')?.[1] ||
+            ''
+        ) || ''
     }))
+  })
+)
+
+// 抓包详情按 id 单取：请求体可能有几百 KB，不能塞进列表一起推
+routers.push(
+  new EventRoute('captures:detail', 'invoke', async (api, data) => {
+    const id = String(data?.params?.id || '')
+    if (!id) return null
+    const record = api.ctx.captures.find((c) => c.id === id)
+    return record ? { ...record } : null
   })
 )
 
