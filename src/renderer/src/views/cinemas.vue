@@ -1,6 +1,6 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, onMounted, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { invoke } from '@utils/ipc'
 import { auth, loadAuth } from '../stores/auth'
 import { setCinemaStats } from '../stores/stats'
@@ -15,6 +15,8 @@ const keyword = ref('')
 const typeFilter = ref('')
 /** 账号配置筛选：'' 全部 / has 已有账号 / none 未配置账号 */
 const accountFilter = ref('')
+/** 账号有效性筛选：'' 全部 / valid 有效 / invalid 无效 */
+const validFilter = ref('')
 const loading = ref(false)
 const accountsLoading = ref(false)
 const error = ref('')
@@ -24,9 +26,12 @@ const paramDialog = ref(false)
 const detailDialog = ref(false)
 const dialogCinema = ref(null)
 
-/** 表头 + 行的列宽：合并单元格靠 rowspan 撑开，宽度必须固定，否则会随账号数抖动
- *  标签列按「pill 实际宽度 + padding」倒推，窄了会被 text-overflow 截成「启用…」 */
-const COLS = ['33%', '10%', '22%', '8%', '8%', '16%']
+/**
+ * 列的宽度：合并单元格靠 rowspan 撑开，宽度必须固定，否则会随账号数抖动。
+ * 有效性列要放下「有效性」表头和「有效 / 无效」标签，比状态列宽一档，
+ * 原来 8% 在最小窗口（900px）下会把标签截成「有…」。
+ */
+const COLS = ['30%', '10%', '22%', '10%', '12%', '16%']
 
 const activeSystem = computed(() => tree.value.find((s) => s.id === activeSystemId.value) || null)
 
@@ -45,14 +50,24 @@ function typeOf(cinema) {
   return ''
 }
 
+/** 单个账号的有效性标签值：valid / invalid；没有账号返回空串 */
+function validityOf(acc) {
+  if (!acc) return ''
+  return isValid(acc) ? 'valid' : 'invalid'
+}
+
 const filteredCinemas = computed(() => {
   // 影城名和程序名都能搜：运营嘴上说的是「沈阳正播」这种程序名
   const kw = keyword.value.trim().toLowerCase()
   return cinemas.value.filter((c) => {
     if (typeFilter.value && typeOf(c) !== typeFilter.value) return false
-    const n = accountsMap.value[c.id]?.length || 0
-    if (accountFilter.value === 'has' && !n) return false
-    if (accountFilter.value === 'none' && n) return false
+    const list = accountsMap.value[c.id] || []
+    if (accountFilter.value === 'has' && !list.length) return false
+    if (accountFilter.value === 'none' && list.length) return false
+    // 有效性按「这家影城有没有命中该状态的账号」判，一个程序挂多账号时不会漏行
+    if (validFilter.value && !list.some((acc) => validityOf(acc) === validFilter.value)) {
+      return false
+    }
     if (!kw) return true
     return `${c.displayName || ''} ${c.programName || ''}`.toLowerCase().includes(kw)
   })
@@ -60,8 +75,17 @@ const filteredCinemas = computed(() => {
 
 /** 有没有生效中的筛选条件：没有时「重置」置灰，别给一个点了没反应的按钮 */
 const hasFilter = computed(
-  () => !!accountFilter.value || !!typeFilter.value || !!keyword.value.trim()
+  () => !!accountFilter.value || !!validFilter.value || !!typeFilter.value || !!keyword.value.trim()
 )
+
+/**
+ * 空表时那句话：账号还在读的时候不能说「没有匹配」——
+ * 有效性筛选要靠账号数据算，读完之前每条都不命中，会误报成筛选无结果。
+ */
+const emptyText = computed(() => {
+  if (accountsLoading.value) return '读取中…'
+  return cinemas.value.length ? '没有匹配的影城' : '该系统下暂无影城'
+})
 
 /** 账号数按**程序**去重：摊成影城行后同一程序会出现多次，逐行相加会把共用的账号算两遍 */
 const totalAccounts = computed(() => {
@@ -75,10 +99,16 @@ const totalAccounts = computed(() => {
   return sum
 })
 
-/** 一个影城可能是 0 个、2 个、3 个账号：行数取账号数，没有账号也占一行看空态 */
+/**
+ * 一个影城可能是 0 个、2 个、3 个账号：行数取账号数，没有账号也占一行看空态。
+ * 按有效性筛选时只留命中的账号行 —— 同一程序既有有效又有失效账号时，
+ * 全列出来会让「无效」的结果里混着有效行；能进到这里就说明至少有一行命中。
+ */
 function rowsOf(cinema) {
   const list = accountsMap.value[cinema.id]
-  return list && list.length ? list : [null]
+  if (!list || !list.length) return [null]
+  if (!validFilter.value) return list
+  return list.filter((acc) => validityOf(acc) === validFilter.value)
 }
 
 function isEnabled(acc) {
@@ -282,7 +312,8 @@ const detailLoading = ref(false)
  */
 const detailColumns = computed(() => {
   const cols = [{ key: 'name', label: '影城名称' }]
-  if (detailCinemas.value.some((c) => c.standardId)) cols.push({ key: 'standardId', label: '专资号' })
+  if (detailCinemas.value.some((c) => c.standardId))
+    cols.push({ key: 'standardId', label: '专资号' })
   if (detailCinemas.value.some((c) => c.city)) cols.push({ key: 'city', label: '城市' })
   if (detailCinemas.value.some((c) => c.address)) cols.push({ key: 'address', label: '地址' })
   return cols
@@ -442,6 +473,114 @@ async function copyParam(row) {
   else ElMessage.warning('剪贴板不可用，请检查系统权限')
 }
 
+// ---- 添加 / 更新出票账号 ----
+const addAccountLoading = ref(false)
+const updateAccountLoading = ref(false)
+/** 更新账号时选择目标账号：一个程序可能挂多个账号 */
+const accountPickerOpen = ref(false)
+const pickingAccountIndex = ref(-1)
+
+/** 只提交有值的字段，空值不往后台塞 */
+function filledConfigValues() {
+  return Object.fromEntries(
+    Object.entries(paramValues.value).filter(
+      ([, v]) => v !== undefined && v !== null && String(v).trim() !== ''
+    )
+  )
+}
+
+async function submitAddAccount() {
+  const cinema = dialogCinema.value
+  if (!cinema) return
+  const { value } = await ElMessageBox.prompt('请输入账号手机号（11 位，1 开头）', '添加账号', {
+    confirmButtonText: '添加',
+    cancelButtonText: '取消',
+    inputPattern: /^1[3-9]\d{9}$/,
+    inputErrorMessage: '手机号格式不正确'
+  }).catch(() => ({ value: null }))
+  if (!value) return
+  addAccountLoading.value = true
+  try {
+    const res = await invoke('cinemas:add-account', {
+      programId: cinema.programId || cinema.id,
+      accountName: String(value).trim(),
+      configValues: filledConfigValues()
+    })
+    if (res?.ok) {
+      ElMessage.success('账号已添加')
+      paramDialog.value = false
+      await refreshAll()
+    } else {
+      ElMessage.error(res?.message || '添加失败')
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '添加失败')
+  } finally {
+    addAccountLoading.value = false
+  }
+}
+
+function openUpdateAccount() {
+  const accounts = paramAccounts.value
+  if (!accounts.length) {
+    ElMessage.warning('该程序还没有出票账号，请先「添加账号」')
+    return
+  }
+  if (accounts.length === 1) {
+    doUpdateAccount(accounts[0])
+    return
+  }
+  pickingAccountIndex.value = -1
+  accountPickerOpen.value = true
+}
+
+async function doUpdateAccount(target) {
+  if (!target) return
+  const cinema = dialogCinema.value
+  if (!cinema) return
+  let accountName = String(target.account || '').trim()
+  if (!accountName) {
+    const { value } = await ElMessageBox.prompt(
+      '该账号没有名字，请输入账号手机号（11 位，1 开头）',
+      '更新账号',
+      {
+        confirmButtonText: '更新',
+        cancelButtonText: '取消',
+        inputPattern: /^1[3-9]\d{9}$/,
+        inputErrorMessage: '手机号格式不正确'
+      }
+    ).catch(() => ({ value: null }))
+    if (!value) return
+    accountName = String(value).trim()
+  }
+  updateAccountLoading.value = true
+  try {
+    const res = await invoke('cinemas:update-account', {
+      accountId: Number(target.id),
+      programId: cinema.programId || cinema.id,
+      accountName,
+      configValues: filledConfigValues()
+    })
+    if (res?.ok) {
+      ElMessage.success('账号已更新')
+      paramDialog.value = false
+      await refreshAll()
+    } else {
+      ElMessage.error(res?.message || '更新失败')
+    }
+  } catch (e) {
+    ElMessage.error(e.message || '更新失败')
+  } finally {
+    updateAccountLoading.value = false
+  }
+}
+
+async function confirmUpdateAccount() {
+  const target = paramAccounts.value[pickingAccountIndex.value]
+  accountPickerOpen.value = false
+  if (target) await doUpdateAccount(target)
+}
+
 watch(activeSystemId, () => {
   if (cinemas.value.length) loadAccounts(cinemas.value)
 })
@@ -469,9 +608,10 @@ async function refreshAll() {
   await reload()
 }
 
-/** 重置筛选：三个条件一起回到默认，已加载的数据不动（要重拉数据用「刷新」） */
+/** 重置筛选：所有条件一起回到默认，已加载的数据不动（要重拉数据用「刷新」） */
 function resetFilters() {
   accountFilter.value = ''
+  validFilter.value = ''
   typeFilter.value = ''
   keyword.value = ''
 }
@@ -481,232 +621,14 @@ onMounted(async () => {
   if (auth.loggedIn) await reload()
 })
 
-/* ---------------- 右侧抓包面板 ---------------- */
-
 /**
- * 把「代理到底抓到了什么、解析出了什么」直接摊在界面上。
- *
- * 以前抓不到参数只能翻日志和诊断文件，判断不了是三种里的哪一种：
- *   - 列表空、过滤数也是 0  → 代理压根没收到流量（证书 / 系统代理被别人抢了）
- *   - 过滤数很大、列表空   → 过滤规则把自己人筛掉了
- *   - 有请求但没命中字段   → 字段名和后台配置对不上，逐条看解析结果就知道差在哪
- */
-/** 面板跟着参数弹窗开合，不需要单独的开关 */
-const capOpen = computed(() => paramDialog.value)
-const capLoading = ref(false)
-const capRecords = ref([])
-const capTotal = ref(0)
-const capSkipped = ref(0)
-/** 被过滤掉的请求（带原因）：「已过滤 N 条」要能点开核对，不能只是个数字 */
-const capSkippedItems = ref([])
-const capProxyRunning = ref(false)
-/** 端口真的在监听吗：proxyRunning 只是内存标志，端口未必连得上 */
-const capListening = ref(false)
-const capFocus = ref([])
-/** 本次抓包用的系统代号：和内置域名表对不上时，解密范围会是空的，得把它亮出来 */
-const capSystemCode = ref('')
-/**
- * 路径特征（mini 的 miniticket）。
- *
- * 有些系统的域名不固定（各影院独立域名），只锁域名族会漏人，
- * 所以抓包时另外按路径认。面板要把这件事显示出来，
- * 否则「解密范围只写了 xcxyyww.cn」会让人以为别家域名不会被抓到。
- */
-const capHints = ref([])
-const capMerged = ref({})
-/** CONNECT 层计数：区分「流量没到」/「全被直通」/「解密了但被过滤」的唯一依据 */
-const capStats = ref({ total: 0, intercepted: 0, tunneled: 0, skipped: 0, failed: 0 })
-/** 实际被直通的域名：目标系统出现在这里，就是解密范围配错了 */
-const capTunneled = ref([])
-let capTimer = null
-
-/** 没打开参数弹窗时，用这套常见字段名去试解析（覆盖凤凰 / 辰星 / 微信系） */
-const CAP_FALLBACK_KEYS = [
-  'phone',
-  'mobile',
-  'tid',
-  'larkSid',
-  '_m_h5_tk',
-  '_m_h5_tk_enc',
-  'token',
-  'accessToken',
-  'sid',
-  'appletToken',
-  'cookie'
-]
-
-/**
- * 手工字段：不是从流量里抓的，算进分母会让「已解析」永远差几个，看起来像抓包不给力。
- * 用**包含**判断而不是整串相等 —— 后台的写法五花八门（会员成本 / 会员成本折扣 / 影院备注…），
- * 要求整串匹配必然漏掉一批。规则与主进程 router 里的 isManualField 保持一致。
- */
-const MANUAL_FIELD_RE = /备注|说明|成本|折扣|note|remark|memo|comment|discount|cost|fee|price/i
-
-const capKeys = computed(() => {
-  // 手工字段直接剔掉：它们不从流量里来，留在分母里会让「已解析」永远差几个，
-  // 看起来像抓包不给力。规则与主进程 router 里的 isManualField 保持一致。
-  const fromDialog = paramFields.value
-    .map((row) => row.key)
-    .filter((key) => key && !MANUAL_FIELD_RE.test(String(key).trim()))
-  return fromDialog.length ? fromDialog : CAP_FALLBACK_KEYS
-})
-
-/**
- * 「解密范围」那一行的悬浮说明。
- *
- * mini 这类系统的域名不固定（各影院独立域名），只显示一个域名族会让人以为
- * 别家影城的流量不会被抓到 —— 把「另外按路径认」这件事写进 title 里。
- */
-const capScopeTitle = computed(() => {
-  const base = capFocus.value.length
-    ? capFocus.value.join('、')
-    : `系统代号：${capSystemCode.value || '（空）'}`
-  if (!capHints.value.length) return base
-  return (
-    `${base}\n这套系统的域名不固定（各影院独立域名），` +
-    `路径里带 ${capHints.value.join('、')} 的请求同样算，` +
-    '抓到第一条就把它并进范围（如 /MiniTicket/index.php）'
-  )
-})
-
-/**
- * 空列表时的分诊结论。
- *
- * 「一条都没有」有三种完全不同的原因，处理办法也完全不同，所以这里按
- * CONNECT 层的连接数把话说死，不要让人自己去猜：
- *   total=0            → 流量没走系统代理（Clash 抢了 / 浏览器用了独立代理）
- *   intercepted=0      → 收到了但全隧道直通，域名族对不上
- *   skipped 很多       → 解密了，但全是 OPTIONS / 静态资源
- */
-const capHint = computed(() => {
-  if (!capProxyRunning.value) return '抓包代理没在运行 —— 点「获取参数」会自动启动它'
-  if (!capListening.value) {
-    return '代理标志是「运行中」，但本机端口连不上 —— 端口被别的程序占了或代理进程异常，先停掉采集再重新开始'
-  }
-  const s = capStats.value
-  const scope = capFocus.value.join('、') || '未锁定'
-  if (s.total === 0) {
-    return (
-      '代理一条连接都没收到，说明浏览器流量没走系统代理。' +
-      '检查 Clash / V2Ray 的「系统代理」开关是否被打开（它会抢回注册表），' +
-      '浏览器是否用了独立代理（SwitchyOmega、Firefox 单独设置）；' +
-      '如果链接是在微信内置浏览器或小程序里打开的，那种环境有的不认系统代理，改用 Chrome / Edge 打开试试'
-    )
-  }
-  if (s.intercepted === 0) {
-    if (!capFocus.value.length) {
-      return (
-        `这套系统没有内置解密域名（系统代号：${capSystemCode.value || '空'}），` +
-        `刚才那一轮已经结束，所以这 ${s.total} 条连接都没解密。` +
-        '重新点一次「获取参数」再刷新页面；若仍抓不到，把下面「直通域名」里属于目标系统的域名发我，我加进域名表'
-      )
-    }
-    return (
-      `收到 ${s.total} 条连接但全部隧道直通，没有一条需要解密。` +
-      `展开下面「直通域名」核对一下：目标系统的接口域名如果在里面，说明解密范围（当前：${scope}）没覆盖到它`
-    )
-  }
-  if (s.skipped > 0) {
-    return (
-      `已解密 ${s.intercepted} 条连接，其中 ${s.skipped} 条是预检 / 静态资源被过滤，还没等到接口请求。` +
-      '在浏览器里刷新目标页面，并确认当前是已登录状态'
-    )
-  }
-  return `已解密 ${s.intercepted} 条连接但一条都没记下来 —— 这是记录层的异常，请把这段现象反馈一下`
-})
-
-async function refreshCaptures() {
-  if (!capOpen.value) return
-  capLoading.value = true
-  try {
-    const res = await invoke('captures:inspect', { keys: capKeys.value, limit: 60 })
-    if (!res?.ok) return
-    capRecords.value = res.records || []
-    capTotal.value = res.total || 0
-    capSkipped.value = res.skipped || 0
-    capSkippedItems.value = res.skippedItems || []
-    capProxyRunning.value = Boolean(res.proxyRunning)
-    capListening.value = Boolean(res.proxyListening)
-    capFocus.value = res.focus || []
-    capSystemCode.value = res.systemCode || ''
-    capHints.value = Array.isArray(res.pathHints) ? res.pathHints : []
-    capMerged.value = res.merged || {}
-    if (res.stats) capStats.value = res.stats
-    capTunneled.value = res.tunneledHosts || []
-    /**
-     * 把面板解析出的值回填到左侧表格。
-     *
-     * 抓包窗口结束后代理仍在解密（解密范围保留），用户晚一点刷新页面也能补上，
-     * 不必再点一次「获取参数」——否则会出现「面板里有值、表格里全是待抓取」的割裂感。
-     */
-    for (const [key, value] of Object.entries(capMerged.value)) {
-      if (value) paramValues.value[key] = value
-    }
-    // 已经有值进来了，上一轮「没收到任何请求」那句结论就不再成立，留着会自相矛盾
-    if (Object.keys(capMerged.value).length) captureReason.value = ''
-  } catch {
-    /* 面板是辅助信息，读失败不打断主流程 */
-  } finally {
-    capLoading.value = false
-  }
-}
-
-/** 面板上所有「这一轮」的计数与明细：清空记录和换系统都要整组复位，否则数字互相打架 */
-function clearCaptureView() {
-  capRecords.value = []
-  capTotal.value = 0
-  capSkipped.value = 0
-  capSkippedItems.value = []
-  capMerged.value = {}
-  capStats.value = { total: 0, intercepted: 0, tunneled: 0, skipped: 0, failed: 0 }
-  capTunneled.value = []
-}
-
-async function clearCaptures() {
-  await invoke('captures:clear').catch(() => {})
-  clearCaptureView()
-}
-
-/**
- * 打开参数弹窗前的准备：清记录 + 把解密范围预置成这家系统的域名族。
- *
- * 后端 `captures:clear` 带 `systemCode` 时会重算 `focusHosts` 并回传，
- * 面板「解密范围」立刻显示这家系统的域名，而不是上一家留下的（比如凤凰的 mtop）。
+ * 打开参数弹窗前的准备：清掉上一家的抓包记录，并把解密范围预置成这家系统的域名族。
+ * 换系统就清一遍，避免同名字段（mobile / token / tid）被上一家影城的记录污染。
  */
 async function primeCaptureScope(cinema) {
   const systemCode = String(cinema?.systemCode || '')
-  const res = await invoke('captures:clear', { systemCode }).catch(() => null)
-  clearCaptureView()
-  capFocus.value = Array.isArray(res?.focus) ? res.focus : []
-  capSystemCode.value = String(res?.systemCode ?? systemCode)
-  capHints.value = Array.isArray(res?.pathHints) ? res.pathHints : []
+  await invoke('captures:clear', { systemCode }).catch(() => null)
 }
-
-/** 路径只留最后两段：一条 mtop 路径上百字，全画出来列表就没法看了 */
-function shortPath(record) {
-  const clean = String(record?.path || '').split('?')[0]
-  const parts = clean.split('/').filter(Boolean)
-  return parts.slice(-2).join('/') || clean
-}
-
-/**
- * 弹窗开着就在轮询：流量是「在浏览器里刷新页面」被动产生的，
- * 没有能精确对应的事件源，只能隔一小段时间取一次。
- * 800ms 够快看出「请求进来了」，也不会把渲染线程刷爆。
- */
-watch(paramDialog, (open) => {
-  if (capTimer) {
-    clearInterval(capTimer)
-    capTimer = null
-  }
-  if (!open) return
-  refreshCaptures()
-  capTimer = setInterval(refreshCaptures, 800)
-})
-
-onUnmounted(() => {
-  if (capTimer) clearInterval(capTimer)
-})
 </script>
 
 <template>
@@ -714,28 +636,22 @@ onUnmounted(() => {
     <div class="head">
       <h1 class="head-title">影城账号</h1>
       <div class="head-actions">
-        <el-select
-          v-model="accountFilter"
-          size="small"
-          placeholder="账号"
-          class="type-filter"
-        >
-          <el-option label="全部影城" value="" />
+        <el-select v-model="accountFilter" size="small" placeholder="账号" class="type-filter">
+          <el-option label="全部" value="" />
           <el-option label="已有账号" value="has" />
           <el-option label="未配置账号" value="none" />
+        </el-select>
+        <el-select v-model="validFilter" size="small" placeholder="有效性" class="type-filter">
+          <el-option label="全部" value="" />
+          <el-option label="有效" value="valid" />
+          <el-option label="无效" value="invalid" />
         </el-select>
         <el-select v-model="typeFilter" size="small" placeholder="类型" class="type-filter">
           <el-option label="全部类型" value="" />
           <el-option label="H5" value="h5" />
           <el-option label="小程序" value="miniapp" />
         </el-select>
-        <el-input
-          v-model="keyword"
-          size="small"
-          placeholder="搜索影城"
-          clearable
-          class="search"
-        />
+        <el-input v-model="keyword" size="small" placeholder="搜索影城" clearable class="search" />
         <el-button size="small" type="primary" @click="refreshAll">刷新</el-button>
         <el-button size="small" :disabled="!hasFilter" @click="resetFilters">重置</el-button>
       </div>
@@ -797,7 +713,7 @@ onUnmounted(() => {
                 <th class="center-head">类型</th>
                 <th class="center-head">出票账号</th>
                 <th class="center-head">状态</th>
-                <th class="center-head">账号</th>
+                <th class="center-head">有效性</th>
                 <th class="center-head">操作</th>
               </tr>
             </thead>
@@ -867,9 +783,7 @@ onUnmounted(() => {
               </template>
 
               <tr v-if="!filteredCinemas.length">
-                <td colspan="6" class="no-result">
-                  {{ cinemas.length ? '没有匹配的影城' : '该系统下暂无影城' }}
-                </td>
+                <td colspan="6" class="no-result">{{ emptyText }}</td>
               </tr>
             </tbody>
           </table>
@@ -880,8 +794,16 @@ onUnmounted(() => {
     <LoginDialog v-model="loginOpen" @success="reload" />
 
     <!-- 参数：只列要抓哪些字段，值留空靠抓包填 -->
-    <el-dialog v-model="paramDialog" :title="paramTitle" width="980px" align-center>
-      <div v-if="dialogCinema" class="dlg param-dlg">
+    <!-- 宽度跟着窗口收（1080 默认窗口下 860 留白刚好，缩到最小宽度也不顶出屏幕）；
+         高度见 .cinema-param-dialog：表头固定、表格自己滚、底部按钮常在 -->
+    <el-dialog
+      v-model="paramDialog"
+      :title="paramTitle"
+      width="min(540px, calc(100vw - 72px))"
+      align-center
+      class="cinema-param-dialog"
+    >
+      <div v-if="dialogCinema" class="dlg">
         <div v-if="paramFields.length" class="param-wrap">
           <table class="param-table">
             <thead>
@@ -915,132 +837,8 @@ onUnmounted(() => {
         <div v-else class="empty-cell">
           {{ paramLoading ? '读取中…' : '该程序没有配置抓包参数' }}
         </div>
-        <div v-if="capturing" class="p-hint">
-          正在抓包（只解密该系统的域名，其余流量照常直通）。现在切到浏览器刷新该系统的页面并完成登录，
-          抓到的值会自动回填；已经抓到了就点「停止」，不用等满时间。
-        </div>
         <!-- 没抓齐时只留一句原因：没流量 / 没登录 / 字段名不同，处理办法完全不同 -->
         <div v-if="!capturing && captureReason" class="p-hint">{{ captureReason }}</div>
-
-        <!--
-          右：实时抓包面板。
-          抓不到参数时这里能直接看出差在哪：没流量（列表空、过滤也 0）、
-          流量被过滤（过滤数大、列表空），还是字段名对不上（有请求但没命中字段）。
-        -->
-        <aside class="cap-side">
-          <div class="cap-head">
-            <span class="cap-title">实时抓包</span>
-            <!-- 端口连不上时不能还显示「抓包中」：那是标志位，不是事实 -->
-            <span
-              class="cap-state"
-              :class="{ live: capProxyRunning && capListening, warn: capProxyRunning && !capListening }"
-            >
-              {{
-                capProxyRunning
-                  ? capListening
-                    ? capturing
-                      ? '抓包中'
-                      : '代理已启动'
-                    : '端口异常'
-                  : '未启动'
-              }}
-            </span>
-          </div>
-
-          <div class="cap-meta">
-            <div class="cap-meta-row">
-              <span>解密范围</span>
-              <!-- 空的时候不能只显示一个「—」：把系统代号带出来，才知道是不是代号没被认出来 -->
-              <span class="cap-scope-line">
-                <span
-                  class="cap-scope"
-                  :class="{ warn: !capFocus.length }"
-                  :title="capScopeTitle"
-                >
-                  {{
-                    capFocus.length
-                      ? capFocus.join('、')
-                      : capSystemCode
-                        ? `未登记（${capSystemCode}）`
-                        : '未锁定'
-                  }}
-                </span>
-                <!-- 域名不固定的系统（mini）：族名之外还要靠路径认，这一截说明它不是全部 -->
-                <em v-if="capHints.length" class="cap-scope-hint" :title="capScopeTitle">+路径</em>
-              </span>
-            </div>
-            <div class="cap-meta-row">
-              <span>已解析</span>
-              <span>{{ Object.keys(capMerged).length }} / {{ capKeys.length }} 个字段</span>
-            </div>
-            <!-- 收到连接却一条都没解密 = 域名族对不上，这个数字变黄就是最直接的信号 -->
-            <div class="cap-meta-row">
-              <span>连接</span>
-              <span
-                class="cap-cnt"
-                :class="{ warn: capStats.total > 0 && capStats.intercepted === 0 }"
-                :title="`总连接 ${capStats.total}，其中解密 ${capStats.intercepted}、隧道直通 ${capStats.tunneled}`"
-              >
-                {{ capStats.total }} 总 · {{ capStats.intercepted }} 解密 ·
-                {{ capStats.tunneled }} 直通
-              </span>
-            </div>
-            <div class="cap-meta-row">
-              <span>请求 / 已过滤</span>
-              <span>{{ capRecords.length }} / {{ capSkipped }}</span>
-            </div>
-          </div>
-
-          <div class="cap-list">
-            <div v-for="rec in capRecords" :key="rec.id" class="cap-item" :class="{ hit: rec.hit }">
-              <div class="cap-line">
-                <span class="cap-method">{{ rec.method }}</span>
-                <span class="cap-path" :title="rec.path">{{ shortPath(rec) }}</span>
-                <span class="cap-code" :class="{ bad: rec.statusCode >= 400 }">
-                  {{ rec.statusCode }}
-                </span>
-                <!-- 响应体 0B：说明报文没拿到，不是字段名的问题 -->
-                <span class="cap-bytes" :class="{ bad: !rec.bodyLen }" :title="`响应体 ${rec.bodyLen} 字符`">
-                  {{ rec.bodyLen ? `${rec.bodyLen}B` : '0B' }}
-                </span>
-              </div>
-              <div v-if="rec.hit" class="cap-fields">
-                <span v-for="(v, k) in rec.params" :key="k" class="cap-chip" :title="`${k} = ${v}`">
-                  {{ k }}
-                </span>
-              </div>
-              <div v-else class="cap-miss">没有目标字段</div>
-            </div>
-
-            <div v-if="!capRecords.length" class="cap-empty">{{ capHint }}</div>
-          </div>
-
-          <!--
-            直通域名：这是「一条请求都没有」时最有价值的一块。
-            浏览器实际连了哪些域名、各几次，全在这里；目标系统的域名一旦出现，
-            就直接说明解密范围没覆盖到它 —— 不用再猜是不是代理没生效。
-          -->
-          <details v-if="capTunneled.length" class="cap-skipped">
-            <summary>直通域名（{{ capTunneled.length }} 个）</summary>
-            <div v-for="t in capTunneled" :key="t.host" class="cap-skip">
-              <span class="cap-path" :title="t.host">{{ t.host }}</span>
-              <span class="cap-reason">{{ t.count }} 次</span>
-            </div>
-          </details>
-
-          <details v-if="capSkippedItems.length" class="cap-skipped">
-            <summary>已过滤的请求（最近 {{ capSkippedItems.length }} 条）</summary>
-            <div v-for="(s, i) in capSkippedItems" :key="i" class="cap-skip">
-              <span class="cap-method">{{ s.method }}</span>
-              <span class="cap-path" :title="s.path">{{ shortPath(s) }}</span>
-              <span class="cap-reason">{{ s.reason }}</span>
-            </div>
-          </details>
-
-          <div class="cap-foot">
-            <button class="op-link" type="button" @click="clearCaptures">清空记录</button>
-          </div>
-        </aside>
       </div>
 
       <template #footer>
@@ -1058,6 +856,37 @@ onUnmounted(() => {
         </el-button>
         <el-button size="small" type="primary" :loading="capturing" @click="captureParams">
           获取参数
+        </el-button>
+        <el-button size="small" :loading="addAccountLoading" @click="submitAddAccount">
+          添加账号
+        </el-button>
+        <el-button size="small" :loading="updateAccountLoading" @click="openUpdateAccount">
+          更新账号
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 更新账号：一个程序挂多个账号时，先选要更新哪一个 -->
+    <el-dialog v-model="accountPickerOpen" title="选择要更新的账号" width="420px" align-center>
+      <div class="dlg">
+        <el-select v-model="pickingAccountIndex" placeholder="选择账号" style="width: 100%">
+          <el-option
+            v-for="(acc, i) in paramAccounts"
+            :key="i"
+            :label="acc.account || '（未命名账号）'"
+            :value="i"
+          />
+        </el-select>
+      </div>
+      <template #footer>
+        <el-button size="small" @click="accountPickerOpen = false">取消</el-button>
+        <el-button
+          size="small"
+          type="primary"
+          :disabled="pickingAccountIndex < 0"
+          @click="confirmUpdateAccount"
+        >
+          更新
         </el-button>
       </template>
     </el-dialog>
@@ -1157,7 +986,7 @@ onUnmounted(() => {
 
 /* 只收敛筛选栏里的相邻按钮：外层已有 gap，别再叠一层 Element 默认的 12px
    不加限定会把弹窗底部的「取消 / 获取参数」也压成 0 间距 */
-.head-actions .el-button+.el-button {
+.head-actions .el-button + .el-button {
   margin-left: 0;
 }
 
@@ -1491,275 +1320,17 @@ tbody tr:hover td {
   color: var(--tx-4);
 }
 
-/* 采集参数表：沿用主表的网格线，列宽跟着内容走，
-   单个值给个上限，太长的 token 类内容截断，靠 title 看全文 */
+/* 采集参数表：沿用主表的网格线。
+   纵向滚动交给弹窗 body（见文末 .cinema-param-dialog），这里再开一条
+   只会出现「表里滚一层、外面再滚一层」的双滚动条 */
 .param-wrap {
-  max-height: 300px;
-  overflow: auto;
-}
-
-/* ---- 参数弹窗右侧的实时抓包面板 ----
-   左内容靠 padding-right 让位，面板绝对定位贴右：不动内部结构，也不需要再包一层 flex。
-   min-height 保证左侧字段少时面板仍有可读高度；420 是「两条 details 都展开、
-   列表还露得出两条记录」的下限，再小就只能看到滚动条了。 */
-.param-dlg {
-  position: relative;
-  min-height: 420px;
-  padding-right: 336px;
-}
-
-.cap-side {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  display: flex;
-  flex-direction: column;
-  width: 324px;
-  overflow: hidden;
-  background: var(--bg-panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-}
-
-.cap-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--line);
-}
-
-.cap-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--tx);
-}
-
-.cap-state {
-  padding: 1px 7px;
-  font-size: 10.5px;
-  color: var(--tx-3);
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 9px;
-}
-
-.cap-state.live {
-  color: var(--ok);
-  background: var(--ok-bg);
-  border-color: transparent;
-}
-
-/* 端口连不上：标志位说在跑、实际一条流量都进不来，必须显眼 */
-.cap-state.warn {
-  color: var(--warn);
-  background: var(--warn-bg);
-  border-color: transparent;
-}
-
-.cap-meta {
-  padding: 7px 10px;
-  border-bottom: 1px solid var(--line-soft);
-}
-
-.cap-meta-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 11px;
-  line-height: 1.75;
-  color: var(--tx-4);
-}
-
-.cap-scope {
-  max-width: 190px;
   min-width: 0;
-  overflow: hidden;
-  font-family: var(--font-mono);
-  color: var(--tx-2);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 范围 + 路径标记：族名可能被省略号截断，标记必须留在省略号外面 */
-.cap-scope-line {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 4px;
-}
-
-.cap-scope-hint {
-  flex: 0 0 auto;
-  font-size: 11px;
-  font-style: normal;
-  color: var(--tx-3);
-  white-space: nowrap;
-}
-
-/* 解密范围为空 = 这套系统没有内置域名表，全量解密兜底或干脆没解 —— 必须显眼 */
-.cap-scope.warn {
-  font-family: inherit;
-  font-weight: 600;
-  color: var(--warn);
-}
-
-/* 连接数：数字比标签重要，用等宽字体对齐，变黄即「收到流量但没解密」 */
-.cap-cnt {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--tx-3);
-  white-space: nowrap;
-}
-
-.cap-cnt.warn {
-  font-weight: 600;
-  color: var(--warn);
-}
-
-.cap-list {
-  flex: 1 1 auto;
-  /* flex 项的 min-height 默认是 auto，不加这行它不肯缩到内容以下，
-     两个 details 都展开时会把「清空记录」挤出面板 */
-  min-height: 0;
-  padding: 5px 6px;
-  overflow: auto;
-}
-
-.cap-item {
-  padding: 5px 6px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-}
-
-.cap-item + .cap-item {
-  margin-top: 3px;
-}
-
-/* 命中目标字段的那条给白底+边框：一眼能认出「就是这条给了值」 */
-.cap-item.hit {
-  background: var(--bg);
-  border-color: var(--line);
-}
-
-.cap-line {
-  display: flex;
-  gap: 6px;
-  align-items: baseline;
-}
-
-.cap-method {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--tx-3);
-}
-
-.cap-path {
-  flex: 1 1 auto;
-  /* 加了响应体大小这一列之后，路径要能真正被压缩：flex 项默认 min-width:auto，
-     不写这行它会撑着不缩，把状态码和字节数挤出面板 */
-  min-width: 0;
-  overflow: hidden;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--tx-2);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cap-code {
-  font-size: 10px;
-  color: var(--tx-4);
-}
-
-.cap-code.bad {
-  color: var(--err);
-}
-
-/* 响应体大小：0B 标红，一眼看出「报文没拿到」和「字段对不上」的区别 */
-.cap-bytes {
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  color: var(--tx-4);
-  opacity: 0.75;
-}
-
-.cap-bytes.bad {
-  font-weight: 600;
-  color: var(--err);
-  opacity: 1;
-}
-
-.cap-fields {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 4px;
-}
-
-.cap-chip {
-  padding: 0 5px;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  line-height: 16px;
-  color: var(--accent);
-  background: var(--accent-bg);
-  border-radius: 3px;
-}
-
-.cap-miss {
-  margin-top: 3px;
-  font-size: 10.5px;
-  color: var(--tx-4);
-}
-
-.cap-empty {
-  padding: 20px 8px;
-  font-size: 11px;
-  line-height: 1.7;
-  color: var(--tx-4);
-  text-align: center;
-}
-
-.cap-skipped {
-  /* 不许被压扁：它自己带 max-height + 内部滚动，压了反而看不出有几条 */
-  flex: 0 0 auto;
-  max-height: 88px;
-  padding: 6px 8px;
-  overflow: auto;
-  border-top: 1px solid var(--line-soft);
-}
-
-.cap-skipped summary {
-  font-size: 11px;
-  color: var(--tx-3);
-  cursor: pointer;
-}
-
-.cap-skip {
-  display: flex;
-  gap: 6px;
-  align-items: baseline;
-  padding: 2px 0;
-  font-size: 10.5px;
-  color: var(--tx-4);
-}
-
-.cap-reason {
-  color: var(--warn);
-  white-space: nowrap;
-}
-
-.cap-foot {
-  flex: 0 0 auto;
-  padding: 6px 10px;
-  text-align: right;
-  border-top: 1px solid var(--line-soft);
 }
 
 .param-table {
-  table-layout: auto;
+  /* 固定布局：列宽已经在 th 上写死了，最后一个「参数值」吃掉剩余宽度。
+     用 auto 时一个超长 token 会把列撑开，弹窗内出现横向滚动条 */
+  table-layout: fixed;
 }
 
 .param-table thead th {
@@ -1768,7 +1339,8 @@ tbody tr:hover td {
 }
 
 .param-table th.p-name {
-  width: 30%;
+  /* 参数名最长 5 个字，30% 会白占一截，把宽度让给参数值（token 才是要看全的） */
+  width: 26%;
 }
 
 .param-table th.p-required {
@@ -1903,5 +1475,28 @@ tbody tr:hover td {
   margin-top: 8px;
   font-size: 11px;
   color: var(--tx-4);
+}
+
+/* ---- 参数弹窗的框 ----
+   弹窗由 Element 渲染到 body 下，拿不到本组件的 scoped 标记，只能用 :global */
+:global(.cinema-param-dialog) {
+  display: flex;
+  flex-direction: column;
+  /* 720 高的默认窗口减去遮罩留白，弹窗最多占满一屏 */
+  max-height: calc(100vh - 48px);
+}
+
+/* 三段式：标题和底部按钮不参与滚动，中间的表格吃掉剩余高度。
+   参数多的程序在表格里自己滚，不再把底部按钮顶到屏幕外，
+   也不需要在 .param-wrap 上再压一个固定 300px 的小窗口 */
+:global(.cinema-param-dialog .el-dialog__body) {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* 说明文字别贴着表格的网格线，滚动时也留一层呼吸 */
+:global(.cinema-param-dialog .el-dialog__body .p-hint:last-child) {
+  margin-bottom: 2px;
 }
 </style>

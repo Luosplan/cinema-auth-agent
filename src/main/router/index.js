@@ -178,6 +178,63 @@ routers.push(
 )
 
 /**
+ * 添加出票账号到平台。
+ * configValues 是参数弹窗里现场抓到的字段值（phone/token/mobile…），
+ * accountName 是账号手机号 —— 后台按手机号建账号，格式不对会建出废账号，先拦。
+ */
+routers.push(
+  new EventRoute('cinemas:add-account', 'invoke', async (api, data) => {
+    const params = data.params || {}
+    const programId = Number(params.programId || 0)
+    const accountName = String(params.accountName || '').trim()
+    const configValues =
+      params.configValues && typeof params.configValues === 'object' ? params.configValues : {}
+    if (!programId) return { ok: false, message: '缺少程序 ID' }
+    if (!accountName) return { ok: false, message: '请填写账号手机号' }
+    if (!/^1[3-9]\d{9}$/.test(accountName)) return { ok: false, message: '手机号格式不正确' }
+    try {
+      const json = await api.ctx.auth.request('/ticket-program-accounts', {
+        programId,
+        accountName,
+        enabled: 1,
+        configValues
+      })
+      return { ok: true, data: json?.data }
+    } catch (e) {
+      return { ok: false, message: e.message, status: e.status || 0 }
+    }
+  })
+)
+
+/**
+ * 更新出票账号。
+ * 一个程序可能挂多个账号，前端在点之前已让用户选定目标账号（accountId）。
+ */
+routers.push(
+  new EventRoute('cinemas:update-account', 'invoke', async (api, data) => {
+    const params = data.params || {}
+    const accountId = Number(params.accountId || 0)
+    const programId = Number(params.programId || 0)
+    const accountName = String(params.accountName || '').trim()
+    const configValues =
+      params.configValues && typeof params.configValues === 'object' ? params.configValues : {}
+    if (!accountId) return { ok: false, message: '缺少账号 ID' }
+    if (!accountName) return { ok: false, message: '缺少账号名' }
+    try {
+      const json = await api.ctx.auth.put(`/ticket-program-accounts/${accountId}`, {
+        programId,
+        accountName,
+        enabled: 1,
+        configValues
+      })
+      return { ok: true, data: json?.data }
+    } catch (e) {
+      return { ok: false, message: e.message, status: e.status || 0 }
+    }
+  })
+)
+
+/**
  * 影城字典只拉一次：详情弹窗点十次不该打十次接口。
  * `/cinemas` 是**当前账号可见**的影城（164 条），程序可能覆盖到账号外的影城 ——
  * 那些行在详情里保留影城名，专资号 / 地址显示「—」，不做跨账号猜。

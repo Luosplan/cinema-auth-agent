@@ -254,6 +254,53 @@ export default class MemberAuth {
   }
 
   /**
+   * PUT 接口（更新出票账号等），自动带会员 token，返回完整响应。
+   * 与 request 的差别只是方法：服务端同一套响应包（success/data/error）。
+   */
+  async put(pathname, body) {
+    const token = this.getToken()
+    if (!token) throw new Error('未登录')
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 15000)
+    let res
+    try {
+      res = await fetch(this.apiBase + pathname, {
+        method: 'PUT',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify(body || {}),
+        signal: controller.signal
+      })
+    } catch (e) {
+      clearTimeout(timer)
+      throw new Error(
+        e.name === 'AbortError'
+          ? '连接超时，请检查网络或服务端是否已启动'
+          : `无法连接服务器：${e.message}`
+      )
+    }
+    clearTimeout(timer)
+
+    let json = null
+    try {
+      json = await res.json()
+    } catch {
+      /* 非 JSON 响应，交给下面的兜底报错 */
+    }
+
+    if (!res.ok || !json || json.success === false) {
+      const message = json?.error || json?.message || `HTTP ${res.status}`
+      const err = new Error(message)
+      err.status = res.status
+      throw err
+    }
+    return json
+  }
+
+  /**
    * 登录。接口地址编译期固定，登录框收「用户名 + 密码」：
    * 后台按 username 查用户，手机号也能当 username 用（账号本身就是手机号时行为不变）。
    * 密码不落盘，token 落盘前加密。

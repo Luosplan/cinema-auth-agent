@@ -1,6 +1,6 @@
 {
   "name": "cinema-auth-agent",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "HK票务助手 - HK 票务登录态采集",
   "main": "./out/main/index.js",
   "author": "cinema-auth-agent",

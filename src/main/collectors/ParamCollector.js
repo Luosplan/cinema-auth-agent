@@ -79,8 +79,16 @@ const KEY_ALIASES = {
   larksid: ['sid'],
   token: ['xaccesstoken', 'accesstoken'],
   // openId 与 wxOpenid 互为别名：后台写哪个都得认，流量里也可能是另一个
-  openid: ['wxopenid'],
-  wxopenid: ['openid']
+  openid: ['wxopenid', 'thirdid', 'unionid'],
+  wxopenid: ['openid'],
+  // 辰星（oristarcloud）的第三方登录把 thirdId / openId / unionId 写成同一个值：
+  // login3rd 三个都在，savePoint 又只有 openId。后台可能只配了其中一个，
+  // 实际触发的接口里却只出现另外两个 —— 三者互为别名才能保证抓得到。
+  thirdid: ['openid', 'wxopenid', 'unionid'],
+  unionid: ['openid', 'wxopenid', 'thirdid'],
+  // 辰星后台把 thirdId 简写成 tid（字段清单里叫 tid，流量里却是 thirdId/openId/unionId）。
+  // 单向：凤凰系的 tid 是淘宝 session（流量里就叫 tid，直接命中、不走这里），互不影响。
+  tid: ['thirdid', 'openid', 'unionid']
 }
 
 /**

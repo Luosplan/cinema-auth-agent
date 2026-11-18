@@ -211,7 +211,7 @@ export function paramSchemaOf(rows) {
       ? row.cinema_id_names.map((c) => c.name).filter(Boolean)
       : []
     return {
-      id: row.id ?? row.account_id ?? row.program_id ?? i,
+      id: row.account_id ?? row.id ?? row.program_id ?? i,
       account: String(row.account_name || ''),
       values,
       info: {
