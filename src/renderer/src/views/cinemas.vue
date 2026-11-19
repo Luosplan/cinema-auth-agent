@@ -489,27 +489,77 @@ function filledConfigValues() {
   )
 }
 
+/**
+ * 手机号字段的候选名：后台按手机号建账号，抓包里叫法各家不一样。
+ * username / account 也可能存的是手机号，但必须过 11 位格式才认 ——
+ * userId / cinemaId 这类字段凑巧是 11 位数字时，全表乱扫会把账号名猜错。
+ */
+const PHONE_KEYS = [
+  'mobile',
+  'phone',
+  'mobileNumber',
+  'mobileNo',
+  'telephone',
+  'username',
+  'account'
+]
+
+/** 抓包结果里能当账号手机号的值，抓不到返回空串 */
+function capturedPhone() {
+  const vals = filledConfigValues()
+  for (const key of PHONE_KEYS) {
+    const v = String(vals[key] || '').trim()
+    if (/^1[3-9]\d{9}$/.test(v)) return v
+  }
+  return ''
+}
+
+/**
+ * 服务端判「未登录」时兜底：主进程已经把本地 token 作废了，
+ * 这里把界面同步回未登录态并收起参数弹窗、拉起登录框 ——
+ * 否则按钮点多少次都还是同一句提示。返回 true 表示已处理，调用方别再报错。
+ */
+async function notifyAuthExpired(res) {
+  if (!(res?.status === 401 || /未登录|登录已过期/.test(String(res?.message || '')))) return false
+  await loadAuth()
+  paramDialog.value = false
+  loginOpen.value = true
+  ElMessage.warning('登录已过期，请重新登录')
+  return true
+}
+
 async function submitAddAccount() {
   const cinema = dialogCinema.value
   if (!cinema) return
-  const { value } = await ElMessageBox.prompt('请输入账号手机号（11 位，1 开头）', '添加账号', {
-    confirmButtonText: '添加',
-    cancelButtonText: '取消',
-    inputPattern: /^1[3-9]\d{9}$/,
-    inputErrorMessage: '手机号格式不正确'
-  }).catch(() => ({ value: null }))
-  if (!value) return
+  // 手机号优先用刚抓到的：本来就在凭证里，没必要再让用户抄一遍
+  let accountName = capturedPhone()
+  if (!accountName) {
+    const { value } = await ElMessageBox.prompt(
+      '这次没抓到手机号，请手动填写（11 位，1 开头）',
+      '添加账号到平台',
+      {
+        confirmButtonText: '添加',
+        cancelButtonText: '取消',
+        inputPattern: /^1[3-9]\d{9}$/,
+        inputErrorMessage: '手机号格式不正确'
+      }
+    ).catch(() => ({ value: null }))
+    if (!value) return
+    accountName = String(value).trim()
+  }
   addAccountLoading.value = true
   try {
     const res = await invoke('cinemas:add-account', {
       programId: cinema.programId || cinema.id,
-      accountName: String(value).trim(),
+      accountName,
       configValues: filledConfigValues()
     })
     if (res?.ok) {
-      ElMessage.success('账号已添加')
+      ElMessage.success(`已添加到平台：${accountName}`)
       paramDialog.value = false
       await refreshAll()
+    } else if (await notifyAuthExpired(res)) {
+      return
     } else {
       ElMessage.error(res?.message || '添加失败')
     }
@@ -523,7 +573,7 @@ async function submitAddAccount() {
 function openUpdateAccount() {
   const accounts = paramAccounts.value
   if (!accounts.length) {
-    ElMessage.warning('该程序还没有出票账号，请先「添加账号」')
+    ElMessage.warning('该程序还没有出票账号，请先「添加账号到平台」')
     return
   }
   if (accounts.length === 1) {
@@ -539,6 +589,8 @@ async function doUpdateAccount(target) {
   const cinema = dialogCinema.value
   if (!cinema) return
   let accountName = String(target.account || '').trim()
+  // 旧账号没名字时，先看这次抓到的手机号，抓不到才问
+  if (!accountName) accountName = capturedPhone()
   if (!accountName) {
     const { value } = await ElMessageBox.prompt(
       '该账号没有名字，请输入账号手机号（11 位，1 开头）',
@@ -565,6 +617,8 @@ async function doUpdateAccount(target) {
       ElMessage.success('账号已更新')
       paramDialog.value = false
       await refreshAll()
+    } else if (await notifyAuthExpired(res)) {
+      return
     } else {
       ElMessage.error(res?.message || '更新失败')
     }
@@ -858,7 +912,7 @@ async function primeCaptureScope(cinema) {
           获取参数
         </el-button>
         <el-button size="small" :loading="addAccountLoading" @click="submitAddAccount">
-          添加账号
+          添加账号到平台
         </el-button>
         <el-button size="small" :loading="updateAccountLoading" @click="openUpdateAccount">
           更新账号

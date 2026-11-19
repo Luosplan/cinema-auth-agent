@@ -21,6 +21,12 @@ const API = {
   me: '/users/me'
 }
 
+/**
+ * 服务端「你没登录」的各种说法。有些接口 401，有些回 200 但 success:false，
+ * 所以除了状态码还要认文案 —— 认出后本地登录态一并作废。
+ */
+const AUTH_EXPIRED = /未登录|登录已过期|token.{0,6}(过期|失效|无效)/i
+
 /** JWT 的 exp 是唯一可靠的到期时间，别按「登录时刻 + 7 天」自己估 */
 function jwtExp(token) {
   try {
@@ -172,106 +178,34 @@ export default class MemberAuth {
     }
   }
 
-  async request(pathname, body, token) {
+  /**
+   * 所有出站请求的唯一出口：方法、鉴权头、超时、错误包裹都在这里。
+   *
+   * 之前每个方法各拼一份 header，添加账号那次走的是不带 token 的 `request`，
+   * 登录了照样被服务端判「未登录」—— 鉴权头的拼装只留一处，谁调用都带着。
+   *
+   * @param {'GET'|'POST'|'PUT'} method
+   * @param {string} pathname 以 / 开头的相对路径
+   * @param {object|null} body GET 传 null
+   * @param {{ auth?: boolean, unwrap?: boolean }} options
+   *   auth=false 给登录用（那时还没有 token）；unwrap=true 只回 data，
+   *   业务接口都包了一层 data，列表接口要的就是它
+   */
+  async send(method, pathname, body, { auth = true, unwrap = false } = {}) {
+    const token = auth ? this.getToken() : ''
+    if (auth && !token) throw new Error('未登录')
+
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), 15000)
     let res
     try {
       res = await fetch(this.apiBase + pathname, {
-        method: 'POST',
+        method,
         headers: {
-          'content-type': 'application/json',
+          ...(body ? { 'content-type': 'application/json' } : {}),
           ...(token ? { authorization: `Bearer ${token}` } : {})
         },
-        body: JSON.stringify(body || {}),
-        signal: controller.signal
-      })
-    } catch (e) {
-      clearTimeout(timer)
-      throw new Error(
-        e.name === 'AbortError' ? '连接超时，请检查网络或服务端是否已启动' : `无法连接服务器：${e.message}`
-      )
-    }
-    clearTimeout(timer)
-
-    let json = null
-    try {
-      json = await res.json()
-    } catch {
-      /* 非 JSON 响应，交给下面的兜底报错 */
-    }
-
-    if (!res.ok || !json || json.success === false) {
-      // ticket-server 的错误字段叫 error，不是 message；两个都认，兜底给 HTTP 状态码
-      const message = json?.error || json?.message || `HTTP ${res.status}`
-      const err = new Error(message)
-      err.status = res.status
-      throw err
-    }
-    // 登录接口的响应是扁平的（token/id/username 直接在顶层），
-    // 业务接口才包 data —— 这里原样返回，由调用方自己取。
-    return json
-  }
-
-  /**
-   * 只读 GET 接口（影城、账号这类查询），自动带会员 token。
-   * 与 request 的差别只是方法和 body —— 服务端同一套响应包。
-   */
-  async get(pathname) {
-    const token = this.getToken()
-    if (!token) throw new Error('未登录')
-
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 15000)
-    let res
-    try {
-      res = await fetch(this.apiBase + pathname, {
-        method: 'GET',
-        headers: { authorization: `Bearer ${token}` },
-        signal: controller.signal
-      })
-    } catch (e) {
-      clearTimeout(timer)
-      throw new Error(
-        e.name === 'AbortError' ? '连接超时，请检查网络或服务端是否已启动' : `无法连接服务器：${e.message}`
-      )
-    }
-    clearTimeout(timer)
-
-    let json = null
-    try {
-      json = await res.json()
-    } catch {
-      /* 非 JSON 响应，交给下面的兜底报错 */
-    }
-
-    if (!res.ok || !json || json.success === false) {
-      const err = new Error(json?.error || json?.message || `HTTP ${res.status}`)
-      err.status = res.status
-      throw err
-    }
-    return json.data || {}
-  }
-
-  /**
-   * PUT 接口（更新出票账号等），自动带会员 token，返回完整响应。
-   * 与 request 的差别只是方法：服务端同一套响应包（success/data/error）。
-   */
-  async put(pathname, body) {
-    const token = this.getToken()
-    if (!token) throw new Error('未登录')
-
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 15000)
-    let res
-    try {
-      res = await fetch(this.apiBase + pathname, {
-        method: 'PUT',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify(body || {}),
+        ...(body ? { body: JSON.stringify(body) } : {}),
         signal: controller.signal
       })
     } catch (e) {
@@ -292,12 +226,38 @@ export default class MemberAuth {
     }
 
     if (!res.ok || !json || json.success === false) {
+      // ticket-server 的错误字段叫 error，不是 message；两个都认，兜底给 HTTP 状态码
       const message = json?.error || json?.message || `HTTP ${res.status}`
+      // 带着 token 还被判未登录 = token 过期或被后台踢了：本地这条立即作废，
+      // 否则界面一直显示「已登录」，用户点多少次都只会收到同一句未登录
+      if (auth && (res.status === 401 || AUTH_EXPIRED.test(message))) {
+        this.clear(message)
+        const err = new Error('登录已过期，请重新登录')
+        err.status = 401
+        throw err
+      }
       const err = new Error(message)
       err.status = res.status
       throw err
     }
-    return json
+    // 登录接口的响应是扁平的（token/id/username 直接在顶层），业务接口才包 data，
+    // 拆不拆由调用方说，这里不替它猜
+    return unwrap ? json.data || {} : json
+  }
+
+  /** 只读 GET（影城、账号这类查询），自动带 token，只回 data */
+  async get(pathname) {
+    return this.send('GET', pathname, null, { unwrap: true })
+  }
+
+  /** 带 token 的 POST（添加出票账号等），返回完整响应 */
+  async post(pathname, body) {
+    return this.send('POST', pathname, body)
+  }
+
+  /** 带 token 的 PUT（更新出票账号等），返回完整响应 */
+  async put(pathname, body) {
+    return this.send('PUT', pathname, body)
   }
 
   /**
@@ -309,10 +269,13 @@ export default class MemberAuth {
     const account = String(username || phone || '').trim()
     if (!account || !password) throw new Error('请填写用户名和密码')
 
-    const data = await this.request(API.signIn, {
-      username: account,
-      password: String(password)
-    })
+    // 登录时还没有 token，显式走不带鉴权的分支
+    const data = await this.send(
+      'POST',
+      API.signIn,
+      { username: account, password: String(password) },
+      { auth: false }
+    )
 
     const token = data.token || data.accessToken || ''
     if (!token) throw new Error('登录响应里没有 token')

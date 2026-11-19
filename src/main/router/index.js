@@ -180,7 +180,8 @@ routers.push(
 /**
  * 添加出票账号到平台。
  * configValues 是参数弹窗里现场抓到的字段值（phone/token/mobile…），
- * accountName 是账号手机号 —— 后台按手机号建账号，格式不对会建出废账号，先拦。
+ * accountName 是账号手机号 —— 抓到了就带上，没抓到让服务端按字段自己取，
+ * 不强制用户手填（手机号本来就在凭证里，重复问一遍纯属添麻烦）。
  */
 routers.push(
   new EventRoute('cinemas:add-account', 'invoke', async (api, data) => {
@@ -190,14 +191,16 @@ routers.push(
     const configValues =
       params.configValues && typeof params.configValues === 'object' ? params.configValues : {}
     if (!programId) return { ok: false, message: '缺少程序 ID' }
-    if (!accountName) return { ok: false, message: '请填写账号手机号' }
-    if (!/^1[3-9]\d{9}$/.test(accountName)) return { ok: false, message: '手机号格式不正确' }
+    // 填了就校验格式：后台按手机号建账号，格式不对会建出删不掉的废账号
+    if (accountName && !/^1[3-9]\d{9}$/.test(accountName)) {
+      return { ok: false, message: '手机号格式不正确' }
+    }
     try {
-      const json = await api.ctx.auth.request('/ticket-program-accounts', {
+      const json = await api.ctx.auth.post('/ticket-program-accounts', {
         programId,
-        accountName,
         enabled: 1,
-        configValues
+        configValues,
+        ...(accountName ? { accountName } : {})
       })
       return { ok: true, data: json?.data }
     } catch (e) {
